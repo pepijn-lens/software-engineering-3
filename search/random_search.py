@@ -25,6 +25,7 @@ class RandomSearch:
 
                 if crashed:
                     print(f"💥 Collision: scenario {i}, seed={s}")
+                    print(cfg)
                     crash_log.append({"cfg": copy.deepcopy(cfg), "seed": s})
                     record_video_episode(self.env_id, cfg, self.policy, self.defaults, s, out_dir="videos")
                     break
