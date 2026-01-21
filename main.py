@@ -1,3 +1,7 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
+warnings.filterwarnings("ignore", category=UserWarning, module="stable_baselines3.common.on_policy_algorithm")
+
 from config.search_space import param_spec, base_cfg
 from policies.pretrained_policy import load_pretrained_policy
 from envs.highway_env_utils import make_env

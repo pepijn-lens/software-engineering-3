@@ -89,10 +89,8 @@ def compute_fitness(objectives: Dict[str, Any]) -> float:
 
     if objectives["crash_count"] > 0:
       return -1
-    elif objectives["min_distance"] < 4:
-      return -1 + (objectives["min_distance"]) / 4
     else:
-      return objectives["min_distance"]
+      return np.log(objectives["min_distance"] + 1)
 
 # ============================================================
 # 2) MUTATION / NEIGHBOR GENERATION
@@ -206,7 +204,13 @@ def hill_climb(
     rng = np.random.default_rng(seed)
 
     # (students): choose initialization (base_cfg or random scenario)
-    current_cfg = mutate_config(base_cfg, param_spec, rng)
+    current_cfg = {
+      "vehicles_count": 59,
+      "lanes_count": 10,
+      "initial_lane_id": 0,
+      "initial_spacing": 0.6,
+      "ego_spacing": 1.1,
+    }
 
     # Evaluate initial solution (seed_base used for reproducibility)
     seed_base = int(rng.integers(1e9))
