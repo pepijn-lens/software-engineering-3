@@ -26,11 +26,12 @@ No internal policy/model details beyond calling policy(obs, info).
 
 import copy
 from typing import Dict, Any, List, Tuple, Optional
+from multiprocessing import Pool, cpu_count
 
 import numpy as np
 from tqdm import tqdm
 
-from envs.highway_env_utils import run_episode
+from envs.highway_env_utils import run_episode, record_video_episode
 
 
 # ============================================================
@@ -70,6 +71,11 @@ def compute_objectives_from_time_series(time_series: List[Dict[str, Any]]) -> Di
         for other in frame["others"]:
           distance = np.linalg.norm(np.array(frame["ego"]["pos"]) - np.array(other["pos"]))
           min_distance = min(min_distance, distance)
+    
+    # Handle edge case where no valid distance was measured
+    if min_distance == float('inf'):
+        min_distance = 0.0
+    
     return {"crash_count": crash_count, "min_distance": min_distance}
 
 
@@ -90,77 +96,112 @@ def compute_fitness(objectives: Dict[str, Any]) -> float:
     if objectives["crash_count"] > 0:
       return -1
     else:
-      return np.log(objectives["min_distance"] + 1)
+      return objectives["min_distance"]
 
 # ============================================================
 # 2) MUTATION / NEIGHBOR GENERATION
 # ============================================================
 
-def mutate_config(
-    cfg: Dict[str, Any],
+def initialize_config(
+    base_cfg: Dict[str, Any],
     param_spec: Dict[str, Any],
     rng: np.random.Generator
 ) -> Dict[str, Any]:
     """
+    Initialize configuration with random values within search space bounds.
+    
+    Randomly samples all parameters uniformly within their specified ranges.
+    
+    Args:
+        base_cfg: Base configuration (e.g., duration, frequencies)
+        param_spec: Search space specification
+        rng: Random number generator
+        
+    Returns:
+        Fully initialized configuration ready for mutation
+    """
+    cfg = copy.deepcopy(base_cfg)
+  
+    for param_key, spec in param_spec.items():
+        if param_key not in cfg:
+            if spec["type"] == "int":
+                cfg[param_key] = int(rng.integers(spec["min"], spec["max"] + 1))
+            elif spec["type"] == "float":
+                cfg[param_key] = float(rng.uniform(spec["min"], spec["max"]))
+    
+    # Ensure initial_lane_id is valid for lanes_count
+    if "initial_lane_id" in cfg and "lanes_count" in cfg:
+        if cfg["initial_lane_id"] >= cfg["lanes_count"]:
+            cfg["initial_lane_id"] = cfg["initial_lane_id"] % cfg["lanes_count"]
+    
+    return cfg
+
+
+def mutate_config(
+    cfg: Dict[str, Any],
+    param_spec: Dict[str, Any],
+    rng: np.random.Generator,
+    mutation_rate: float = 0.2
+) -> Dict[str, Any]:
+    """
     Generate ONE neighbor configuration by mutating the current scenario.
+    
+    Uses single-parameter mutation: randomly selects ONE parameter to mutate.
+    This is more effective than mutating all parameters at once.
 
     Inputs:
-      - cfg: current scenario dict (e.g., vehicles_count, initial_spacing, ego_spacing, initial_lane_id)
+      - cfg: current scenario dict (must have all parameters initialized)
       - param_spec: search space bounds, types (int/float), min/max
       - rng: random generator
+      - mutation_rate: size of mutations (0.0-1.0), default 0.2 = 20% of range
 
     Requirements:
       - Do NOT modify cfg in-place (return a copy).
       - Keep mutated values within [min, max] from param_spec.
-      - If you mutate lanes_count, keep initial_lane_id valid (0..lanes_count-1).
-
-    Students can implement:
-      - single-parameter mutation (recommended baseline)
-      - multiple-parameter mutation
-      - adaptive step sizes, etc.
+      - Keep initial_lane_id valid (0..lanes_count-1).
     """
     
-    # param_spec = {
-    # "vehicles_count":   {"type": "int",   "min": 5,   "max": 60},
-    # "lanes_count":      {"type": "int",   "min": 3,   "max": 10},
-    # "initial_spacing":  {"type": "float", "min": 0.5, "max": 5.0},
-    # "ego_spacing":      {"type": "float", "min": 1.0, "max": 4.0},
-    # "initial_lane_id":  {"type": "int",   "min": 0,   "max": 4},
-    # }
-
     new_cfg = copy.deepcopy(cfg)
 
-    # randomly choose a key from param_spec
+    # Single-parameter mutation: randomly select ONE parameter to mutate
     key = rng.choice(list(param_spec.keys()))
-    
-    # Initialize the key if it doesn't exist
-    if key not in new_cfg:
-      spec = param_spec[key]
-      if spec["type"] == "int":
-        new_cfg[key] = int(rng.integers(spec["min"], spec["max"] + 1))
-      elif spec["type"] == "float":
-        new_cfg[key] = float(rng.uniform(spec["min"], spec["max"]))
 
-    # Mutate the chosen parameter
+    # Mutate the selected parameter
     if param_spec[key]["type"] == "int":
-      new_cfg[key] += int(rng.integers(-1, 2))  # -1, 0, or 1
+        spec_range = param_spec[key]["max"] - param_spec[key]["min"]
+        max_step = max(1, int(spec_range * mutation_rate))
+        step = int(rng.integers(-max_step, max_step + 1))
+        new_cfg[key] += step
     elif param_spec[key]["type"] == "float":
-      max_change = 0.1 * new_cfg[key]
-      new_cfg[key] += float(rng.uniform(-max_change, max_change))
+        spec_range = param_spec[key]["max"] - param_spec[key]["min"]
+        max_change = spec_range * mutation_rate
+        new_cfg[key] += float(rng.uniform(-max_change, max_change))
 
-    # clamp the values to the min and max
+    # Clamp the values to the min and max
     new_cfg[key] = np.clip(new_cfg[key], param_spec[key]["min"], param_spec[key]["max"])
     
     # Ensure initial_lane_id is valid for the current lanes_count
     if "initial_lane_id" in new_cfg and "lanes_count" in new_cfg:
-      if new_cfg["initial_lane_id"] >= new_cfg["lanes_count"]:
-        new_cfg["initial_lane_id"] = new_cfg["initial_lane_id"] % new_cfg["lanes_count"]
+        if new_cfg["initial_lane_id"] >= new_cfg["lanes_count"]:
+            new_cfg["initial_lane_id"] = new_cfg["initial_lane_id"] % new_cfg["lanes_count"]
 
     return new_cfg
 
 # ============================================================
 # 3) HILL CLIMBING SEARCH
 # ============================================================
+
+def _evaluate_neighbor(args):
+    """Helper function for parallel neighbor evaluation."""
+    from policies.pretrained_policy import load_pretrained_policy
+    neighbor_cfg, env_id, defaults, seed_base = args
+    # Load policy in each worker process (can't pickle the policy object)
+    policy = load_pretrained_policy("agents/model")
+    crashed, ts = run_episode(env_id, neighbor_cfg, policy, defaults, seed_base)
+    obj = compute_objectives_from_time_series(ts)
+    fit = compute_fitness(obj)
+    return neighbor_cfg, obj, fit
+
 
 def hill_climb(
     env_id: str,
@@ -171,9 +212,16 @@ def hill_climb(
     seed: int = 0,
     iterations: int = 100,
     neighbors_per_iter: int = 10,
+    mutation_rate: float = 0.2,
 ) -> Dict[str, Any]:
     """
-    Hill climbing loop.
+    Hill climbing loop with Simulated Annealing.
+    
+    Uses:
+    - Aggressive initialization (high vehicles, low spacing, more lanes)
+    - Single-parameter mutation 
+    - Linear temperature decay for simulated annealing
+    - Parallel neighbor evaluation
 
     You should:
       1) Start from an initial scenario (base_cfg or random sample).
@@ -182,9 +230,9 @@ def hill_climb(
          Then compute objectives + fitness.
       3) For each iteration:
             - Generate neighbors_per_iter neighbors using mutate_config
-            - Evaluate each neighbor
+            - Evaluate each neighbor in parallel
             - Select the best neighbor
-            - Accept it if it improves fitness (or implement another acceptance rule)
+            - Accept it if it improves fitness OR probabilistically (simulated annealing)
             - Optionally stop early if a crash is found
       4) Return the best scenario found and enough info to reproduce.
 
@@ -203,14 +251,8 @@ def hill_climb(
     """
     rng = np.random.default_rng(seed)
 
-    # (students): choose initialization (base_cfg or random scenario)
-    current_cfg = {
-      "vehicles_count": 59,
-      "lanes_count": 10,
-      "initial_lane_id": 0,
-      "initial_spacing": 0.6,
-      "ego_spacing": 1.1,
-    }
+    # Initialize configuration once with aggressive crash-prone values
+    current_cfg = initialize_config(base_cfg, param_spec, rng)
 
     # Evaluate initial solution (seed_base used for reproducibility)
     seed_base = int(rng.integers(1e9))
@@ -224,54 +266,133 @@ def hill_climb(
     best_seed_base = seed_base
 
     history = [best_fit]
+    iterations_without_improvement = 0
 
-    #  (students): implement HC loop
-    # - generate neighbors
-    # - evaluate
-    # - pick best
-    # - accept if improved
-    # - early stop on crash (optional)
-    print(f"number of iterations: {iterations}")
-    pbar = tqdm(range(iterations), desc=f"Hill Climbing (best fitness: {best_fit:.4f})")
-    for i in pbar:
-      neighbors = [mutate_config(current_cfg, param_spec, rng) for _ in range(neighbors_per_iter)]
-      improved = False
-      
-      for neighbor in tqdm(neighbors, desc=f"Evaluating neighbors", leave=False):
-        crashed, ts = run_episode(env_id, neighbor, policy, defaults, seed_base)
-        obj = compute_objectives_from_time_series(ts)
-        fit = compute_fitness(obj)
+    #  Hill climbing with simulated annealing, restarts, and parallel evaluation
+    # - Simulated annealing: accept worse solutions with decreasing probability
+    # - Single-parameter mutations: more focused search
+    # - Restart mechanism: reinitialize to new random config after 20 iterations without improvement
+    # - Parallel evaluation: speed up neighbor evaluation using all CPU cores
+    
+    n_cores = cpu_count()
+    print(f"Starting Hill Climbing with {iterations} iterations")
+    print(f"Initial fitness: {best_fit:.4f}")
+    print(f"Initial config: lanes={current_cfg.get('lanes_count')}, vehicles={current_cfg.get('vehicles_count')}, "
+          f"spacing={current_cfg.get('initial_spacing'):.1f}, lane_id={current_cfg.get('initial_lane_id')}")
+    print(f"Using {n_cores} CPU cores for parallel evaluation")
+    
+    pbar = tqdm(range(iterations), desc=f"HC (fit={best_fit:.4f})")
+    
+    with Pool(processes=n_cores) as pool:
+      for i in pbar:
+        # Restart if stuck in local minimum for too long
+        if iterations_without_improvement > 20:
+          print(f"\n⚠️  Stuck in local minimum! Restarting with new random config...")
+          current_cfg = initialize_config(base_cfg, param_spec, rng)
+          seed_base = int(rng.integers(1e9))
+          crashed, ts = run_episode(env_id, current_cfg, policy, defaults, seed_base)
+          obj = compute_objectives_from_time_series(ts)
+          cur_fit = compute_fitness(obj)
+          print(f"   New config: lanes={current_cfg.get('lanes_count')}, vehicles={current_cfg.get('vehicles_count')}, "
+                f"spacing={current_cfg.get('initial_spacing'):.1f}, lane_id={current_cfg.get('initial_lane_id')}, fitness={cur_fit:.4f}")
+          iterations_without_improvement = 0
+          
+        # Simulated annealing temperature (slower exponential decay)
+        temperature = 5.0 * (0.99 ** i)  # Starts at 5.0, decays slowly
         
-        if fit < best_fit:
-          best_cfg = copy.deepcopy(neighbor)
-          best_obj = dict(obj)
-          best_fit = fit
-          best_seed_base = seed_base
-          current_cfg = copy.deepcopy(best_cfg)
-          improved = True
-          pbar.set_description(f"Hill Climbing (best fitness: {best_fit:.4f})")
+        # Generate new seed for this iteration to explore stochastic variations
+        iter_seed = int(rng.integers(1e9))
+        
+        # Generate neighbors with single-parameter mutations
+        neighbors = [mutate_config(current_cfg, param_spec, rng, mutation_rate=mutation_rate) 
+                     for _ in range(neighbors_per_iter)]
+        
+        # Parallel evaluation of neighbors with iteration-specific seed
+        eval_args = [(neighbor, env_id, defaults, iter_seed) for neighbor in neighbors]
+        results = pool.map(_evaluate_neighbor, eval_args)
+        
+        # Find best neighbor and check for crashes
+        best_neighbor_fit = float('inf')
+        best_neighbor = None
+        best_neighbor_obj = None
+        
+        for neighbor_cfg, obj, fit in results:
+          if fit < best_neighbor_fit:
+            best_neighbor_fit = fit
+            best_neighbor = neighbor_cfg
+            best_neighbor_obj = obj
           
           # Early stop if crash found
           if obj["crash_count"] > 0:
+            best_cfg = copy.deepcopy(neighbor_cfg)
+            best_obj = dict(obj)
+            best_fit = fit
+            best_seed_base = iter_seed  # Update to the seed that found the crash
             history.append(best_fit)
-            print(f"\nCrash found at iteration {i}!")
+            print(f"\n🎯 Crash found at iteration {i}!")
+            print(f"Final config: {best_cfg}")
+            print(f"Seed: {best_seed_base}")
+            
+            # Record video of crash scenario
+            print("📹 Recording video of crash scenario...")
+            _, video_folder = record_video_episode(
+                env_id, best_cfg, policy, defaults, best_seed_base, out_dir="videos"
+            )
+            print(f"✅ Video saved to: {video_folder}")
+            
             return {
               "best_cfg": best_cfg,
               "best_objectives": best_obj,
               "best_fitness": best_fit,
               "best_seed_base": best_seed_base,
-              "history": history
+              "history": history,
+              "video_folder": video_folder
             }
-      
-      if improved:
-        history.append(best_fit)
-
+        
+        # Update global best if found
+        if best_neighbor_fit < best_fit:
+          best_cfg = copy.deepcopy(best_neighbor)
+          best_obj = dict(best_neighbor_obj)
+          best_fit = best_neighbor_fit
+          best_seed_base = iter_seed  # Update to the seed that produced this result
+          history.append(best_fit)
+          iterations_without_improvement = 0
+        else:
+          iterations_without_improvement += 1
+        
+        # Simulated annealing: decide whether to move to best neighbor
+        delta = best_neighbor_fit - cur_fit
+        
+        if delta < 0:
+          # Neighbor is better than current, always accept
+          current_cfg = copy.deepcopy(best_neighbor)
+          cur_fit = best_neighbor_fit
+          pbar.set_description(f"HC (fit={best_fit:.4f}, cur={cur_fit:.4f})")
+        else:
+          # Neighbor is worse, accept with probability based on temperature
+          acceptance_prob = np.exp(-delta / temperature) if temperature > 0 else 0.0
+          
+          if rng.random() < acceptance_prob:
+            current_cfg = copy.deepcopy(best_neighbor)
+            cur_fit = best_neighbor_fit
+            pbar.set_description(f"HC (fit={best_fit:.4f}, cur={cur_fit:.4f}, T={temperature:.2f}, SA✓)")
+          else:
+            pbar.set_description(f"HC (fit={best_fit:.4f}, cur={cur_fit:.4f}, T={temperature:.2f})")
+    
+    # Record video of best scenario found
+    print("\n📹 Recording video of best scenario found...")
+    _, video_folder = record_video_episode(
+        env_id, best_cfg, policy, defaults, best_seed_base, out_dir="videos"
+    )
+    print(f"✅ Video saved to: {video_folder}")
+    
     return {
       "best_cfg": best_cfg,
       "best_objectives": best_obj,
       "best_fitness": best_fit,
       "best_seed_base": best_seed_base,
-      "history": history
+      "history": history,
+      "video_folder": video_folder
     }
 
 class HillClimbSearch:
@@ -282,6 +403,18 @@ class HillClimbSearch:
     self.policy = policy
     self.defaults = defaults
 
-  def run_search(self, iterations=100, neighbors_per_iter=10, seed=0):
-    return hill_climb(self.env_id, self.base_cfg, self.param_spec, self.policy, self.defaults, 
-                      seed=seed, iterations=iterations, neighbors_per_iter=neighbors_per_iter)
+  def run_search(self, iterations=100, neighbors_per_iter=10, seed=0, mutation_rate=0.2):
+    """
+    Run hill climbing search with simulated annealing.
+    
+    Args:
+        iterations: Number of hill climbing iterations
+        neighbors_per_iter: Number of neighbors to generate per iteration
+        seed: Random seed
+        mutation_rate: Size of mutations (0.0-1.0). Higher = larger jumps in search space.
+    """
+    return hill_climb(
+        self.env_id, self.base_cfg, self.param_spec, self.policy, self.defaults, 
+        seed=seed, iterations=iterations, neighbors_per_iter=neighbors_per_iter,
+        mutation_rate=mutation_rate
+    )
