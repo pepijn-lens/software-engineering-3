@@ -38,29 +38,34 @@ from envs.highway_env_utils import run_episode, record_video_episode
 # 1) OBJECTIVES FROM TIME SERIES
 # ============================================================
 
+# ============================================================
+# 1) OBJECTIVES FROM TIME SERIES
+# ============================================================
+
 def compute_objectives_from_time_series(time_series: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Compute objective values from the recorded time-series.
-    
-    Exploits policy training knowledge:
-    - Policy was trained with high_speed_reward=0.6 (target: 20-40 m/s)
-    - This means crashes are more likely in scenarios where:
-      1. Dense traffic forces ego to slow down or navigate tight spaces
-      2. High ego speed in congested conditions (less reaction time)
-      3. Right lane congestion (forces risky overtaking maneuvers)
-    
-    Objectives tracked:
-    - crash_count: 1 if collision, else 0
-    - min_distance: Minimum distance to any vehicle (core safety metric)
-    - avg_ego_speed: Average ego speed (high speed in dense traffic = danger)
-    - time_in_traffic: Fraction of time with vehicle within 10m (measures congestion)
-    - right_lane_congestion: Average vehicles in rightmost 2 lanes (forces lane changes)
+    Compute your objective values from the recorded time-series.
+
+    The time_series is a list of frames. Each frame typically contains:
+      - frame["crashed"]: bool
+      - frame["ego"]: dict or None, e.g. {"pos":[x,y], "lane_id":..., "length":..., "width":...}
+      - frame["others"]: list of dicts with positions, lane_id, etc.
+
+    Minimum requirements (suggested):
+      - crash_count: 1 if any collision happened, else 0
+      - min_distance: minimum distance between ego and any other vehicle over time (float)
+
+    Return a dictionary, e.g.:
+        {
+          "crash_count": 0 or 1,
+          "min_distance": float
+        }
+
+    NOTE: If you want, you can add more objectives (lane-specific distances, time-to-crash, etc.)
+    but keep the keys above at least.
     """
     crash_count = 0
     min_distance = float('inf')
-    ego_speeds = []
-    frames_in_traffic = 0
-    right_lane_counts = []
     
     for frame in time_series:
         if frame["crashed"]:
@@ -87,11 +92,15 @@ def compute_objectives_from_time_series(time_series: List[Dict[str, Any]]) -> Di
 def compute_fitness(objectives: Dict[str, Any]) -> float:
     """
     Convert objectives into ONE scalar fitness value to MINIMIZE.
-    
-    Requirement: Crashes must always be better than non-crashes.
-    
-    Formula for non-crashes:
-        fitness = min_distance
+
+    Requirement:
+    - Any crashing scenario must be strictly better than any non-crashing scenario.
+
+    Examples:
+    - If crash_count==1: fitness = -1 (best)
+    - Else: fitness = min_distance (smaller is better)
+
+    You can design a more refined scalarization if desired.
     """
     if objectives["crash_count"] > 0:
         return -1.0  # Best possible fitness
@@ -113,20 +122,21 @@ def mutate_config(
 ) -> Dict[str, Any]:
     """
     Generate ONE neighbor configuration by mutating the current scenario.
-    
-    Uses single-parameter mutation:
-    - Mutate a random parameter within its range
 
     Inputs:
-      - cfg: current scenario dict (must have all parameters initialized)
+      - cfg: current scenario dict (e.g., vehicles_count, initial_spacing, ego_spacing, initial_lane_id)
       - param_spec: search space bounds, types (int/float), min/max
       - rng: random generator
-      - mutation_rate: size of mutations (0.0-1.0), default 0.2 = 20% of range
 
     Requirements:
       - Do NOT modify cfg in-place (return a copy).
       - Keep mutated values within [min, max] from param_spec.
-      - Keep initial_lane_id valid (0..lanes_count-1).
+      - If you mutate lanes_count, keep initial_lane_id valid (0..lanes_count-1).
+
+    Students can implement:
+      - single-parameter mutation (recommended baseline)
+      - multiple-parameter mutation
+      - adaptive step sizes, etc.
     """
     
     new_cfg = copy.deepcopy(cfg)
@@ -191,6 +201,36 @@ def _evaluate_neighbor(args):
 
 class HillClimbSearch:
     def __init__(self, env_id, base_cfg, param_spec, policy, defaults):
+        """
+        Hill climbing loop.
+
+        You should:
+        1) Start from an initial scenario (base_cfg or random sample).
+        2) Evaluate it by running:
+                crashed, ts = run_episode(env_id, cfg, policy, defaults, seed_base)
+            Then compute objectives + fitness.
+        3) For each iteration:
+                - Generate neighbors_per_iter neighbors using mutate_config
+                - Evaluate each neighbor
+                - Select the best neighbor
+                - Accept it if it improves fitness (or implement another acceptance rule)
+                - Optionally stop early if a crash is found
+        4) Return the best scenario found and enough info to reproduce.
+
+        Return dict MUST contain at least:
+            {
+            "best_cfg": Dict[str, Any],
+            "best_objectives": Dict[str, Any],
+            "best_fitness": float,
+            "best_seed_base": int,
+            "history": List[float]
+            }
+
+        Optional but useful:
+            - "best_time_series": ts
+            - "evaluations": int
+        """
+
         self.env_id = env_id
         self.base_cfg = base_cfg
         self.param_spec = param_spec
@@ -203,17 +243,9 @@ class HillClimbSearch:
         iterations: int = 100,
         neighbors_per_iter: int = 10,
         mutation_rate: float = 0.2,
+        n_scenarios: int = 50,
     ) -> Dict[str, Any]:
-        """
-        Run hill climbing search to find crash scenarios.
-        
-        Returns a dictionary with:
-        - best_fitness: best fitness value found
-        - best_objectives: objectives for best configuration
-        - best_cfg: best configuration found
-        - best_seed_base: seed used for best configuration
-        - video_folder: folder where videos are saved
-        """
+
         from search.base_search import ScenarioSearch
         
         print(f"Running Hill Climbing Search for {iterations} iterations...")
@@ -243,6 +275,7 @@ class HillClimbSearch:
             print(f"💥 Collision found in initial configuration!")
             record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
             return {
+                "iteration": 0,
                 "best_fitness": best_fitness,
                 "best_objectives": best_obj,
                 "best_cfg": best_cfg,
@@ -291,6 +324,7 @@ class HillClimbSearch:
                     print(f"💥 Collision found at iteration {i}!")
                     record_video_episode(self.env_id, neighbor_cfg, self.policy, self.defaults, neighbor_seed, out_dir="videos")
                     return {
+                        "iteration": i,
                         "best_fitness": neighbor_fitness,
                         "best_objectives": neighbor_obj,
                         "best_cfg": neighbor_cfg,
@@ -317,6 +351,7 @@ class HillClimbSearch:
         record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
         
         return {
+            "iteration": "N/A",
             "best_fitness": best_fitness,
             "best_objectives": best_obj,
             "best_cfg": best_cfg,

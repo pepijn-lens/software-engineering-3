@@ -1,11 +1,14 @@
 import warnings
 import os
-import pandas as pd
 
-# Suppress warnings for cleaner output
-warnings.filterwarnings("ignore", category=UserWarning)
+# Suppress warnings for cleaner output - must be set before any imports
+warnings.simplefilter("ignore", UserWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+os.environ['PYTHONWARNINGS'] = "ignore::UserWarning"
+
+import pandas as pd
 
 from config.search_space import param_spec, base_cfg
 from policies.pretrained_policy import load_pretrained_policy
@@ -19,10 +22,11 @@ def main():
     env, defaults = make_env(env_id)
 
     # Initialize search
+    # search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
     search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
 
     best_cfgs = []
-    n_scenarios = 10
+    n_scenarios = 50
 
     for i in range(n_scenarios):
         results = search.run_search(
@@ -39,7 +43,6 @@ def main():
     print("="*60)
     print(results_df.describe())
     
-
 
     # print("\n" + "="*60)
     # print("RESULTS")
