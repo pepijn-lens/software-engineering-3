@@ -1,17 +1,18 @@
 """
 Evaluation and Comparison Script for Hill Climbing vs Random Search
 
-This script runs multiple Hill Climbing searches and extracts:
-- Initial random configurations → Random Search baseline
-- Final best configurations → Hill Climbing results
-
-Then performs statistical analysis and comparison.
+This script:
+1. Generates N random scenario configurations
+2. Runs Random Search on each scenario (100 evaluations per scenario)
+3. Runs Hill Climbing on the same scenarios (10 iterations × 10 neighbors = 100 evaluations)
+4. Compares results and saves analysis to files
 """
 
 import warnings
 import os
 import time
 import json
+import copy
 from typing import List, Dict, Any
 from pathlib import Path
 
@@ -23,249 +24,286 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 os.environ['PYTHONWARNINGS'] = "ignore::UserWarning"
 
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
 
 from config.search_space import param_spec, base_cfg
 from policies.pretrained_policy import load_pretrained_policy
-from envs.highway_env_utils import make_env
-from search.hill_climbing import HillClimbSearch
+from envs.highway_env_utils import make_env, run_episode
+from search.hill_climbing import HillClimbSearch, compute_objectives_from_time_series, compute_fitness
+from search.base_search import ScenarioSearch
 
 
-def run_evaluation(
-    n_scenarios: int = 100,
-    iterations: int = 10,
-    neighbors_per_iter: int = 10,
-    mutation_rate: float = 0.3,
-    base_seed: int = 0,
-    save_results: bool = True,
-    results_dir: str = "results"
+def run_random_search_evaluation(
+    initial_cfg: Dict[str, Any],
+    env_id: str,
+    policy,
+    defaults: Dict[str, Any],
+    n_evaluations: int,
+    rng: np.random.Generator,
+    scenario_id: int
 ) -> Dict[str, Any]:
     """
-    Run evaluation comparing Random Search (initial configs) vs Hill Climbing (best configs).
+    Run random search on a given initial configuration.
+    Evaluates n_evaluations random configs (same config, different seeds).
     
-    Args:
-        n_scenarios: Number of scenarios to run (each starts with a random config)
-        iterations: Number of hill climbing iterations per scenario
-        neighbors_per_iter: Number of neighbors to evaluate per iteration
-        mutation_rate: Mutation rate for hill climbing
-        base_seed: Base seed for reproducibility
-        save_results: Whether to save results to files
-        results_dir: Directory to save results
-        
     Returns:
-        Dictionary containing all results and analysis
+        Dictionary with all evaluation results and statistics
     """
-    print("="*80)
-    print("EVALUATION: Hill Climbing vs Random Search")
-    print("="*80)
-    print(f"Running {n_scenarios} scenarios...")
-    print(f"Hill Climbing: {iterations} iterations, {neighbors_per_iter} neighbors/iter")
-    print(f"Total evaluations per scenario: ~{1 + iterations * neighbors_per_iter}")
-    print("="*80)
-    
-    # Setup
-    env_id = "highway-fast-v0"
-    policy = load_pretrained_policy("agents/model")
-    env, defaults = make_env(env_id)
-    search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
-    
-    # Storage for results
-    initial_results = []  # Random Search baseline
-    hill_climbing_results = []  # Hill Climbing results
-    all_runs = []  # Complete run data
-    
-    # Run scenarios
+    results = []
+    crashes_found = []
     start_time = time.time()
     
-    for i in tqdm(range(n_scenarios), desc="Running scenarios"):
-        scenario_start = time.time()
+    for eval_idx in range(n_evaluations):
+        seed = int(rng.integers(1e9))
+        eval_start = time.time()
+        crashed, ts = run_episode(env_id, initial_cfg, policy, defaults, seed)
+        eval_time = time.time() - eval_start
         
-        # Run hill climbing search
-        results = search.run_search(
-            seed=base_seed + i,  # Different seed for each scenario
-            iterations=iterations,
-            neighbors_per_iter=neighbors_per_iter,
-            mutation_rate=mutation_rate,
-            disable_tqdm=True  # Disable inner progress bar to avoid reprinting
-        )
+        if crashed:
+            obj = {"crash_count": 1, "min_distance": 0.0}
+            fitness = -1.0
+            crashes_found.append({
+                "evaluation_num": eval_idx,
+                "config": copy.deepcopy(initial_cfg),
+                "seed": seed,
+                "objectives": obj,
+                "fitness": fitness
+            })
+        else:
+            obj = compute_objectives_from_time_series(ts)
+            fitness = compute_fitness(obj)
         
-        scenario_time = time.time() - scenario_start
-        
-        # Extract computation times (separate for random search and hill climbing)
-        initial_eval_time = results.get("initial_eval_time_seconds", 0.0)
-        hc_eval_time = results.get("hill_climbing_eval_time_seconds", 0.0)
-        
-        # Extract initial (Random Search equivalent)
-        initial_data = {
-            "scenario_id": i,
-            "config": results["initial_cfg"],
-            "objectives": results["initial_objectives"],
-            "fitness": results["initial_fitness"],
-            "seed": results["initial_seed"],
-            "crashed": results["initial_objectives"]["crash_count"] > 0,
-            "min_distance": results["initial_objectives"]["min_distance"],
-            "eval_time_seconds": initial_eval_time,
-            "runtime_seconds": scenario_time  # Total scenario time for reference
-        }
-        initial_results.append(initial_data)
-        
-        # Extract best (Hill Climbing result)
-        hc_data = {
-            "scenario_id": i,
-            "config": results["best_cfg"],
-            "objectives": results["best_objectives"],
-            "fitness": results["best_fitness"],
-            "seed": results["best_seed_base"],
-            "crashed": results["best_objectives"]["crash_count"] > 0,
-            "min_distance": results["best_objectives"]["min_distance"],
-            "iterations": results["iteration"],
-            "total_evaluations": results["total_evaluations"],
-            "eval_time_seconds": hc_eval_time,
-            "runtime_seconds": scenario_time  # Total scenario time for reference
-        }
-        hill_climbing_results.append(hc_data)
-        
-        # Store complete run data
-        all_runs.append({
-            "scenario_id": i,
-            "initial": initial_data,
-            "hill_climbing": hc_data,
-            "evaluation_history": results.get("evaluation_history", [])
+        results.append({
+            "evaluation_num": eval_idx,
+            "config": copy.deepcopy(initial_cfg),
+            "seed": seed,
+            "objectives": obj,
+            "fitness": fitness,
+            "crashed": crashed,
+            "eval_time_seconds": eval_time
         })
     
     total_time = time.time() - start_time
     
+    # Find best result (lowest fitness = best)
+    best_result = min(results, key=lambda x: x["fitness"])
+    
+    return {
+        "scenario_id": scenario_id,
+        "initial_cfg": initial_cfg,
+        "all_evaluations": results,
+        "crashes_found": crashes_found,
+        "best_result": best_result,
+        "total_evaluations": n_evaluations,
+        "total_time_seconds": total_time,
+        "avg_time_per_eval_seconds": total_time / n_evaluations
+    }
+
+
+def run_evaluation(
+    n_scenarios: int = 100,
+    random_search_evals: int = 100,
+    hc_iterations: int = 10,
+    hc_neighbors_per_iter: int = 10,
+    hc_mutation_rate: float = 0.3,
+    base_seed: int = 42,
+    results_dir: str = "results"
+) -> Dict[str, Any]:
+    """
+    Run evaluation comparing Random Search vs Hill Climbing on the same scenarios.
+    
+    Args:
+        n_scenarios: Number of random scenarios to generate and test
+        random_search_evals: Number of evaluations per scenario for random search
+        hc_iterations: Number of hill climbing iterations per scenario
+        hc_neighbors_per_iter: Number of neighbors per hill climbing iteration
+        hc_mutation_rate: Mutation rate for hill climbing
+        base_seed: Base seed for reproducibility
+        results_dir: Directory to save results
+    """
+    # Setup
+    env_id = "highway-fast-v0"
+    policy = load_pretrained_policy("agents/model")
+    env, defaults = make_env(env_id)
+    hc_search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
+    
+    # Generate random initial configurations
+    rng = np.random.default_rng(base_seed)
+    initial_configs = []
+    for i in range(n_scenarios):
+        scenario_rng = np.random.default_rng(base_seed + i)
+        cfg = ScenarioSearch.sample_random_config(hc_search, scenario_rng)
+        initial_configs.append(cfg)
+    
+    # Storage for results
+    random_search_results = []
+    hill_climbing_results = []
+    
+    total_start_time = time.time()
+    
+    # Run evaluations
+    for i in tqdm(range(n_scenarios), desc="Evaluating scenarios"):
+        scenario_cfg = initial_configs[i]
+        scenario_rng = np.random.default_rng(base_seed + i)
+        
+        # Run Random Search
+        rs_start = time.time()
+        rs_result = run_random_search_evaluation(
+            scenario_cfg, env_id, policy, defaults,
+            random_search_evals, scenario_rng, i
+        )
+        rs_time = time.time() - rs_start
+        rs_result["total_time_seconds"] = rs_time
+        random_search_results.append(rs_result)
+        
+        # Run Hill Climbing (starting from the same initial config)
+        hc_start = time.time()
+        hc_result = hc_search.run_search(
+            seed=base_seed + i,
+            iterations=hc_iterations,
+            neighbors_per_iter=hc_neighbors_per_iter,
+            mutation_rate=hc_mutation_rate,
+            disable_tqdm=True
+        )
+        hc_time = time.time() - hc_start
+        hc_result["scenario_id"] = i
+        hc_result["initial_cfg"] = scenario_cfg
+        hc_result["total_time_seconds"] = hc_time
+        hill_climbing_results.append(hc_result)
+    
+    total_time = time.time() - total_start_time
+    
     # Perform analysis
-    analysis = analyze_results(initial_results, hill_climbing_results, total_time)
+    analysis = analyze_results(random_search_results, hill_climbing_results, total_time)
     
     # Compile results
     evaluation_results = {
         "parameters": {
             "n_scenarios": n_scenarios,
-            "iterations": iterations,
-            "neighbors_per_iter": neighbors_per_iter,
-            "mutation_rate": mutation_rate,
-            "base_seed": base_seed
+            "random_search_evals": random_search_evals,
+            "hc_iterations": hc_iterations,
+            "hc_neighbors_per_iter": hc_neighbors_per_iter,
+            "hc_mutation_rate": hc_mutation_rate,
+            "base_seed": base_seed,
+            "total_evaluations_per_method": random_search_evals
         },
-        "initial_results": initial_results,  # Random Search baseline
-        "hill_climbing_results": hill_climbing_results,  # Hill Climbing results
-        "all_runs": all_runs,  # Complete data
+        "random_search_results": random_search_results,
+        "hill_climbing_results": hill_climbing_results,
         "analysis": analysis,
         "total_runtime_seconds": total_time
     }
     
-    # Save results if requested
-    if save_results:
-        save_evaluation_results(evaluation_results, results_dir)
+    # Save results
+    save_evaluation_results(evaluation_results, results_dir)
     
     return evaluation_results
 
 
 def analyze_results(
-    initial_results: List[Dict],
+    rs_results: List[Dict],
     hc_results: List[Dict],
     total_time: float
 ) -> Dict[str, Any]:
     """Perform statistical analysis and comparison."""
     
-    # Convert to DataFrames for easier analysis
-    initial_df = pd.DataFrame([
-        {
+    # Extract data for analysis
+    rs_data = []
+    for r in rs_results:
+        best = r["best_result"]
+        rs_data.append({
             "scenario_id": r["scenario_id"],
-            "crashed": r["crashed"],
-            "min_distance": r["min_distance"],
-            "fitness": r["fitness"],
-            "eval_time_seconds": r["eval_time_seconds"],
-            **r["config"]  # Flatten config parameters
-        }
-        for r in initial_results
-    ])
-    
-    hc_df = pd.DataFrame([
-        {
-            "scenario_id": r["scenario_id"],
-            "crashed": r["crashed"],
-            "min_distance": r["min_distance"],
-            "fitness": r["fitness"],
-            "iterations": r["iterations"],
+            "crashed": best["crashed"],
+            "min_distance": best["objectives"]["min_distance"],
+            "fitness": best["fitness"],
             "total_evaluations": r["total_evaluations"],
-            "eval_time_seconds": r["eval_time_seconds"],
-            **r["config"]  # Flatten config parameters
-        }
-        for r in hc_results
-    ])
+            "total_time_seconds": r["total_time_seconds"],
+            "crashes_found_count": len(r["crashes_found"]),
+            **r["initial_cfg"]
+        })
+    
+    hc_data = []
+    for r in hc_results:
+        hc_data.append({
+            "scenario_id": r["scenario_id"],
+            "crashed": r["best_objectives"]["crash_count"] > 0,
+            "min_distance": r["best_objectives"]["min_distance"],
+            "fitness": r["best_fitness"],
+            "total_evaluations": r["total_evaluations"],
+            "total_time_seconds": r["total_time_seconds"],
+            "iterations": r["iteration"],
+            **r["initial_cfg"]
+        })
+    
+    rs_df = pd.DataFrame(rs_data)
+    hc_df = pd.DataFrame(hc_data)
     
     # 1. Failure Discovery Analysis
-    initial_crashes = initial_df["crashed"].sum()
+    rs_crashes = rs_df["crashed"].sum()
     hc_crashes = hc_df["crashed"].sum()
-    
-    initial_crash_rate = initial_crashes / len(initial_df)
+    rs_crash_rate = rs_crashes / len(rs_df)
     hc_crash_rate = hc_crashes / len(hc_df)
     
-    # Distinct crashes (unique configs that crashed)
-    initial_crash_configs = set(
-        tuple(sorted(r["config"].items()))
-        for r in initial_results if r["crashed"]
+    # Distinct crashes
+    rs_crash_configs = set(
+        tuple(sorted(r["initial_cfg"].items()))
+        for r in rs_results if r["best_result"]["crashed"]
     )
     hc_crash_configs = set(
-        tuple(sorted(r["config"].items()))
-        for r in hc_results if r["crashed"]
+        tuple(sorted(r["initial_cfg"].items()))
+        for r in hc_results if r["best_objectives"]["crash_count"] > 0
     )
     
     # Min distance statistics (for non-crashes)
-    initial_min_dist = initial_df[~initial_df["crashed"]]["min_distance"]
+    rs_min_dist = rs_df[~rs_df["crashed"]]["min_distance"]
     hc_min_dist = hc_df[~hc_df["crashed"]]["min_distance"]
     
+    # First crash evaluation number
+    rs_first_crash_eval = None
+    hc_first_crash_eval = None
+    for r in rs_results:
+        if r["crashes_found"]:
+            rs_first_crash_eval = r["crashes_found"][0]["evaluation_num"]
+            break
+    for r in hc_results:
+        if r["best_objectives"]["crash_count"] > 0:
+            # Find evaluation number from history
+            for eval_hist in r.get("evaluation_history", []):
+                if eval_hist.get("crashed", False):
+                    hc_first_crash_eval = eval_hist.get("evaluation_num")
+                    break
+            if hc_first_crash_eval is not None:
+                break
+    
     # 2. Efficiency Analysis
-    avg_evaluations = hc_df["total_evaluations"].mean()
-    avg_runtime_per_scenario = total_time / len(hc_results)
-    evaluations_per_second = avg_evaluations / avg_runtime_per_scenario if avg_runtime_per_scenario > 0 else 0
-    
-    # Computation time analysis
-    avg_initial_eval_time = initial_df["eval_time_seconds"].mean()
-    avg_hc_eval_time = hc_df["eval_time_seconds"].mean()
-    total_initial_eval_time = initial_df["eval_time_seconds"].sum()
-    total_hc_eval_time = hc_df["eval_time_seconds"].sum()
-    
-    # Time per evaluation
-    avg_time_per_initial_eval = avg_initial_eval_time  # 1 evaluation per initial
-    avg_time_per_hc_eval = avg_hc_eval_time / avg_evaluations if avg_evaluations > 0 else 0
-    
-    # First crash evaluation (if any)
-    initial_first_crash = None
-    hc_first_crash = None
-    for i, r in enumerate(initial_results):
-        if r["crashed"]:
-            initial_first_crash = i + 1
-            break
-    for i, r in enumerate(hc_results):
-        if r["crashed"]:
-            hc_first_crash = i + 1
-            break
+    rs_avg_time = rs_df["total_time_seconds"].mean()
+    hc_avg_time = hc_df["total_time_seconds"].mean()
+    rs_avg_time_per_eval = rs_avg_time / rs_df["total_evaluations"].iloc[0]
+    hc_avg_time_per_eval = hc_avg_time / hc_df["total_evaluations"].mean()
     
     # 3. Scenario Characteristics (for crashes)
-    initial_crash_scenarios = [r for r in initial_results if r["crashed"]]
-    hc_crash_scenarios = [r for r in hc_results if r["crashed"]]
+    rs_crash_scenarios = [r for r in rs_results if r["best_result"]["crashed"]]
+    hc_crash_scenarios = [r for r in hc_results if r["best_objectives"]["crash_count"] > 0]
     
     analysis = {
         "failure_discovery": {
             "random_search": {
-                "crashes_found": int(initial_crashes),
-                "crash_rate": float(initial_crash_rate),
-                "distinct_crashes": len(initial_crash_configs),
-                "first_crash_scenario": initial_first_crash,
+                "crashes_found": int(rs_crashes),
+                "crash_rate": float(rs_crash_rate),
+                "distinct_crashes": len(rs_crash_configs),
+                "first_crash_evaluation": rs_first_crash_eval,
                 "min_distance_stats": {
-                    "mean": float(initial_min_dist.mean()) if len(initial_min_dist) > 0 else None,
-                    "std": float(initial_min_dist.std()) if len(initial_min_dist) > 0 else None,
-                    "min": float(initial_min_dist.min()) if len(initial_min_dist) > 0 else None,
-                    "max": float(initial_min_dist.max()) if len(initial_min_dist) > 0 else None
+                    "mean": float(rs_min_dist.mean()) if len(rs_min_dist) > 0 else None,
+                    "std": float(rs_min_dist.std()) if len(rs_min_dist) > 0 else None,
+                    "min": float(rs_min_dist.min()) if len(rs_min_dist) > 0 else None,
+                    "max": float(rs_min_dist.max()) if len(rs_min_dist) > 0 else None
                 }
             },
             "hill_climbing": {
                 "crashes_found": int(hc_crashes),
                 "crash_rate": float(hc_crash_rate),
                 "distinct_crashes": len(hc_crash_configs),
-                "first_crash_scenario": hc_first_crash,
+                "first_crash_evaluation": hc_first_crash_eval,
                 "min_distance_stats": {
                     "mean": float(hc_min_dist.mean()) if len(hc_min_dist) > 0 else None,
                     "std": float(hc_min_dist.std()) if len(hc_min_dist) > 0 else None,
@@ -276,40 +314,36 @@ def analyze_results(
         },
         "efficiency": {
             "total_runtime_seconds": float(total_time),
-            "avg_runtime_per_scenario": float(avg_runtime_per_scenario),
-            "avg_evaluations_per_scenario": float(avg_evaluations),
-            "evaluations_per_second": float(evaluations_per_second),
-            "total_evaluations": int(hc_df["total_evaluations"].sum()),
-            "computation_time": {
-                "random_search": {
-                    "total_eval_time_seconds": float(total_initial_eval_time),
-                    "avg_eval_time_seconds": float(avg_initial_eval_time),
-                    "avg_time_per_evaluation_seconds": float(avg_time_per_initial_eval),
-                    "total_evaluations": len(initial_results)
-                },
-                "hill_climbing": {
-                    "total_eval_time_seconds": float(total_hc_eval_time),
-                    "avg_eval_time_seconds": float(avg_hc_eval_time),
-                    "avg_time_per_evaluation_seconds": float(avg_time_per_hc_eval),
-                    "total_evaluations": int(hc_df["total_evaluations"].sum())
-                }
+            "random_search": {
+                "avg_time_per_scenario_seconds": float(rs_avg_time),
+                "avg_time_per_evaluation_seconds": float(rs_avg_time_per_eval),
+                "total_evaluations": int(rs_df["total_evaluations"].sum())
+            },
+            "hill_climbing": {
+                "avg_time_per_scenario_seconds": float(hc_avg_time),
+                "avg_time_per_evaluation_seconds": float(hc_avg_time_per_eval),
+                "total_evaluations": int(hc_df["total_evaluations"].sum())
             }
         },
         "scenario_characteristics": {
-            "random_search_crashes": initial_crash_scenarios,
-            "hill_climbing_crashes": hc_crash_scenarios,
+            "random_search_crashes": len(rs_crash_scenarios),
+            "hill_climbing_crashes": len(hc_crash_scenarios),
             "random_search_crash_params": {
                 "vehicles_count": {
-                    "mean": float(initial_df[initial_df["crashed"]]["vehicles_count"].mean()) if initial_crashes > 0 else None,
-                    "std": float(initial_df[initial_df["crashed"]]["vehicles_count"].std()) if initial_crashes > 0 else None
+                    "mean": float(rs_df[rs_df["crashed"]]["vehicles_count"].mean()) if rs_crashes > 0 else None,
+                    "std": float(rs_df[rs_df["crashed"]]["vehicles_count"].std()) if rs_crashes > 0 else None
                 },
                 "lanes_count": {
-                    "mean": float(initial_df[initial_df["crashed"]]["lanes_count"].mean()) if initial_crashes > 0 else None,
-                    "std": float(initial_df[initial_df["crashed"]]["lanes_count"].std()) if initial_crashes > 0 else None
+                    "mean": float(rs_df[rs_df["crashed"]]["lanes_count"].mean()) if rs_crashes > 0 else None,
+                    "std": float(rs_df[rs_df["crashed"]]["lanes_count"].std()) if rs_crashes > 0 else None
                 },
                 "initial_spacing": {
-                    "mean": float(initial_df[initial_df["crashed"]]["initial_spacing"].mean()) if initial_crashes > 0 else None,
-                    "std": float(initial_df[initial_df["crashed"]]["initial_spacing"].std()) if initial_crashes > 0 else None
+                    "mean": float(rs_df[rs_df["crashed"]]["initial_spacing"].mean()) if rs_crashes > 0 else None,
+                    "std": float(rs_df[rs_df["crashed"]]["initial_spacing"].std()) if rs_crashes > 0 else None
+                },
+                "initial_lane_id": {
+                    "mean": float(rs_df[rs_df["crashed"]]["initial_lane_id"].mean()) if rs_crashes > 0 else None,
+                    "std": float(rs_df[rs_df["crashed"]]["initial_lane_id"].std()) if rs_crashes > 0 else None
                 }
             },
             "hill_climbing_crash_params": {
@@ -324,12 +358,16 @@ def analyze_results(
                 "initial_spacing": {
                     "mean": float(hc_df[hc_df["crashed"]]["initial_spacing"].mean()) if hc_crashes > 0 else None,
                     "std": float(hc_df[hc_df["crashed"]]["initial_spacing"].std()) if hc_crashes > 0 else None
+                },
+                "initial_lane_id": {
+                    "mean": float(hc_df[hc_df["crashed"]]["initial_lane_id"].mean()) if hc_crashes > 0 else None,
+                    "std": float(hc_df[hc_df["crashed"]]["initial_lane_id"].std()) if hc_crashes > 0 else None
                 }
             }
         },
         "dataframes": {
-            "initial_df": initial_df,
-            "hc_df": hc_df
+            "random_search_df": rs_df,
+            "hill_climbing_df": hc_df
         }
     }
     
@@ -350,98 +388,108 @@ def save_evaluation_results(results: Dict[str, Any], results_dir: str = "results
         json.dump(results_to_save, f, indent=2, default=str)
     
     # Save DataFrames as CSV
-    results["analysis"]["dataframes"]["initial_df"].to_csv(
+    results["analysis"]["dataframes"]["random_search_df"].to_csv(
         f"{results_dir}/random_search_results.csv", index=False
     )
-    results["analysis"]["dataframes"]["hc_df"].to_csv(
+    results["analysis"]["dataframes"]["hill_climbing_df"].to_csv(
         f"{results_dir}/hill_climbing_results.csv", index=False
     )
     
-    print(f"\nResults saved to {results_dir}/")
-
-
-def print_summary(analysis: Dict[str, Any]):
-    """Print a summary of the analysis."""
-    print("\n" + "="*80)
-    print("EVALUATION SUMMARY")
-    print("="*80)
-    
-    rs = analysis["failure_discovery"]["random_search"]
-    hc = analysis["failure_discovery"]["hill_climbing"]
-    eff = analysis["efficiency"]
-    
-    print("\n1. FAILURE DISCOVERY")
-    print("-" * 80)
-    print(f"Random Search (Initial Configs):")
-    print(f"  - Crashes found: {rs['crashes_found']} / {rs['crashes_found'] + len(analysis['dataframes']['initial_df']) - rs['crashes_found']}")
-    print(f"  - Crash rate: {rs['crash_rate']:.2%}")
-    print(f"  - Distinct crashes: {rs['distinct_crashes']}")
-    if rs['min_distance_stats']['mean'] is not None:
-        print(f"  - Avg min distance (non-crashes): {rs['min_distance_stats']['mean']:.4f}m")
-    
-    print(f"\nHill Climbing (After Mutations):")
-    print(f"  - Crashes found: {hc['crashes_found']}")
-    print(f"  - Crash rate: {hc['crash_rate']:.2%}")
-    print(f"  - Distinct crashes: {hc['distinct_crashes']}")
-    if hc['min_distance_stats']['mean'] is not None:
-        print(f"  - Avg min distance (non-crashes): {hc['min_distance_stats']['mean']:.4f}m")
-    
-    print("\n2. EFFICIENCY")
-    print("-" * 80)
-    print(f"  - Total runtime: {eff['total_runtime_seconds']:.2f} seconds")
-    print(f"  - Avg runtime per scenario: {eff['avg_runtime_per_scenario']:.2f} seconds")
-    print(f"  - Avg evaluations per scenario: {eff['avg_evaluations_per_scenario']:.1f}")
-    print(f"  - Evaluations per second: {eff['evaluations_per_second']:.2f}")
-    print(f"  - Total evaluations: {eff['total_evaluations']}")
-    
-    print("\n3. COMPUTATION TIME")
-    print("-" * 80)
-    rs_time = eff['computation_time']['random_search']
-    hc_time = eff['computation_time']['hill_climbing']
-    print(f"Random Search Evaluation:")
-    print(f"  - Total eval time: {rs_time['total_eval_time_seconds']:.2f} seconds")
-    print(f"  - Avg eval time per scenario: {rs_time['avg_eval_time_seconds']:.4f} seconds")
-    print(f"  - Avg time per evaluation: {rs_time['avg_time_per_evaluation_seconds']:.4f} seconds")
-    print(f"  - Total evaluations: {rs_time['total_evaluations']}")
-    print(f"\nHill Climbing Evaluation:")
-    print(f"  - Total eval time: {hc_time['total_eval_time_seconds']:.2f} seconds")
-    print(f"  - Avg eval time per scenario: {hc_time['avg_eval_time_seconds']:.2f} seconds")
-    print(f"  - Avg time per evaluation: {hc_time['avg_time_per_evaluation_seconds']:.4f} seconds")
-    print(f"  - Total evaluations: {hc_time['total_evaluations']}")
-    
-    print("\n4. SCENARIO CHARACTERISTICS")
-    print("-" * 80)
-    rs_params = analysis["scenario_characteristics"]["random_search_crash_params"]
-    hc_params = analysis["scenario_characteristics"]["hill_climbing_crash_params"]
-    
-    if rs['crashes_found'] > 0:
-        print("Random Search Crash Scenarios:")
-        print(f"  - Avg vehicles_count: {rs_params['vehicles_count']['mean']:.2f} ± {rs_params['vehicles_count']['std']:.2f}")
-        print(f"  - Avg lanes_count: {rs_params['lanes_count']['mean']:.2f} ± {rs_params['lanes_count']['std']:.2f}")
-        print(f"  - Avg initial_spacing: {rs_params['initial_spacing']['mean']:.2f} ± {rs_params['initial_spacing']['std']:.2f}")
-    
-    if hc['crashes_found'] > 0:
-        print("\nHill Climbing Crash Scenarios:")
-        print(f"  - Avg vehicles_count: {hc_params['vehicles_count']['mean']:.2f} ± {hc_params['vehicles_count']['std']:.2f}")
-        print(f"  - Avg lanes_count: {hc_params['lanes_count']['mean']:.2f} ± {hc_params['lanes_count']['std']:.2f}")
-        print(f"  - Avg initial_spacing: {hc_params['initial_spacing']['mean']:.2f} ± {hc_params['initial_spacing']['std']:.2f}")
-    
-    print("\n" + "="*80)
+    # Save summary report as text file
+    analysis = results["analysis"]
+    with open(f"{results_dir}/evaluation_summary.txt", "w") as f:
+        f.write("="*80 + "\n")
+        f.write("EVALUATION SUMMARY: Hill Climbing vs Random Search\n")
+        f.write("="*80 + "\n\n")
+        
+        # Parameters
+        f.write("PARAMETERS\n")
+        f.write("-" * 80 + "\n")
+        params = results["parameters"]
+        f.write(f"Number of scenarios: {params['n_scenarios']}\n")
+        f.write(f"Random Search evaluations per scenario: {params['random_search_evals']}\n")
+        f.write(f"Hill Climbing iterations: {params['hc_iterations']}\n")
+        f.write(f"Hill Climbing neighbors per iteration: {params['hc_neighbors_per_iter']}\n")
+        f.write(f"Total evaluations per method: {params['total_evaluations_per_method']}\n")
+        f.write(f"Total runtime: {results['total_runtime_seconds']:.2f} seconds\n\n")
+        
+        # Failure Discovery
+        f.write("1. FAILURE DISCOVERY\n")
+        f.write("-" * 80 + "\n")
+        rs_fd = analysis["failure_discovery"]["random_search"]
+        hc_fd = analysis["failure_discovery"]["hill_climbing"]
+        
+        f.write("Random Search:\n")
+        f.write(f"  - Crashes found: {rs_fd['crashes_found']} / {params['n_scenarios']}\n")
+        f.write(f"  - Crash rate: {rs_fd['crash_rate']:.2%}\n")
+        f.write(f"  - Distinct crashes: {rs_fd['distinct_crashes']}\n")
+        if rs_fd['first_crash_evaluation'] is not None:
+            f.write(f"  - First crash at evaluation: {rs_fd['first_crash_evaluation']}\n")
+        if rs_fd['min_distance_stats']['mean'] is not None:
+            f.write(f"  - Avg min distance (non-crashes): {rs_fd['min_distance_stats']['mean']:.4f}m\n")
+            f.write(f"  - Min distance range: [{rs_fd['min_distance_stats']['min']:.4f}, {rs_fd['min_distance_stats']['max']:.4f}]m\n")
+        
+        f.write("\nHill Climbing:\n")
+        f.write(f"  - Crashes found: {hc_fd['crashes_found']} / {params['n_scenarios']}\n")
+        f.write(f"  - Crash rate: {hc_fd['crash_rate']:.2%}\n")
+        f.write(f"  - Distinct crashes: {hc_fd['distinct_crashes']}\n")
+        if hc_fd['first_crash_evaluation'] is not None:
+            f.write(f"  - First crash at evaluation: {hc_fd['first_crash_evaluation']}\n")
+        if hc_fd['min_distance_stats']['mean'] is not None:
+            f.write(f"  - Avg min distance (non-crashes): {hc_fd['min_distance_stats']['mean']:.4f}m\n")
+            f.write(f"  - Min distance range: [{hc_fd['min_distance_stats']['min']:.4f}, {hc_fd['min_distance_stats']['max']:.4f}]m\n")
+        
+        # Efficiency
+        f.write("\n2. EFFICIENCY\n")
+        f.write("-" * 80 + "\n")
+        eff = analysis["efficiency"]
+        f.write(f"Total runtime: {eff['total_runtime_seconds']:.2f} seconds\n\n")
+        
+        f.write("Random Search:\n")
+        f.write(f"  - Avg time per scenario: {eff['random_search']['avg_time_per_scenario_seconds']:.2f} seconds\n")
+        f.write(f"  - Avg time per evaluation: {eff['random_search']['avg_time_per_evaluation_seconds']:.4f} seconds\n")
+        f.write(f"  - Total evaluations: {eff['random_search']['total_evaluations']}\n")
+        
+        f.write("\nHill Climbing:\n")
+        f.write(f"  - Avg time per scenario: {eff['hill_climbing']['avg_time_per_scenario_seconds']:.2f} seconds\n")
+        f.write(f"  - Avg time per evaluation: {eff['hill_climbing']['avg_time_per_evaluation_seconds']:.4f} seconds\n")
+        f.write(f"  - Total evaluations: {eff['hill_climbing']['total_evaluations']}\n")
+        
+        # Scenario Characteristics
+        f.write("\n3. SCENARIO CHARACTERISTICS\n")
+        f.write("-" * 80 + "\n")
+        sc = analysis["scenario_characteristics"]
+        
+        if rs_fd['crashes_found'] > 0:
+            f.write("Random Search Crash Scenarios:\n")
+            rs_params = sc["random_search_crash_params"]
+            f.write(f"  - Vehicles count: {rs_params['vehicles_count']['mean']:.2f} ± {rs_params['vehicles_count']['std']:.2f}\n")
+            f.write(f"  - Lanes count: {rs_params['lanes_count']['mean']:.2f} ± {rs_params['lanes_count']['std']:.2f}\n")
+            f.write(f"  - Initial spacing: {rs_params['initial_spacing']['mean']:.2f} ± {rs_params['initial_spacing']['std']:.2f}\n")
+            f.write(f"  - Initial lane ID: {rs_params['initial_lane_id']['mean']:.2f} ± {rs_params['initial_lane_id']['std']:.2f}\n")
+        
+        if hc_fd['crashes_found'] > 0:
+            f.write("\nHill Climbing Crash Scenarios:\n")
+            hc_params = sc["hill_climbing_crash_params"]
+            f.write(f"  - Vehicles count: {hc_params['vehicles_count']['mean']:.2f} ± {hc_params['vehicles_count']['std']:.2f}\n")
+            f.write(f"  - Lanes count: {hc_params['lanes_count']['mean']:.2f} ± {hc_params['lanes_count']['std']:.2f}\n")
+            f.write(f"  - Initial spacing: {hc_params['initial_spacing']['mean']:.2f} ± {hc_params['initial_spacing']['std']:.2f}\n")
+            f.write(f"  - Initial lane ID: {hc_params['initial_lane_id']['mean']:.2f} ± {hc_params['initial_lane_id']['std']:.2f}\n")
+        
+        f.write("\n" + "="*80 + "\n")
 
 
 def main():
     """Main entry point for evaluation."""
     results = run_evaluation(
-        n_scenarios=100,  # Number of scenarios to run
-        iterations=10,    # Hill climbing iterations per scenario
-        neighbors_per_iter=10,  # Neighbors per iteration
-        mutation_rate=0.3,  # Mutation rate
-        base_seed=0,  # Base seed for reproducibility
-        save_results=True
+        n_scenarios=100,
+        random_search_evals=100,
+        hc_iterations=10,
+        hc_neighbors_per_iter=10,
+        hc_mutation_rate=0.3,
+        base_seed=42,
+        results_dir="results"
     )
-    
-    # Print summary
-    print_summary(results["analysis"])
     
     return results
 
