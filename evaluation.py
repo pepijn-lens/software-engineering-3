@@ -104,7 +104,7 @@ def run_random_search_evaluation(
     # Timeout: Since evaluations run in parallel, we wait for all to complete
     # If any worker hangs, we'll timeout. Set to reasonable time for worst-case evaluation
     # 30 seconds should be plenty for a single episode evaluation
-    timeout = 30
+    timeout = n_workers + 10
     
     pool = Pool(processes=n_workers, initializer=_init_rs_worker)
     try:
@@ -505,7 +505,6 @@ def save_evaluation_results(results: Dict[str, Any], results_dir: str = "results
         f.write(f"Random Search evaluations per scenario: {params['random_search_evals']}\n")
         f.write(f"Hill Climbing iterations: {params['hc_iterations']}\n")
         f.write(f"Hill Climbing neighbors per iteration: {params['hc_neighbors_per_iter']}\n")
-        f.write(f"Total evaluations per method: {params['total_evaluations_per_method']}\n")
         f.write(f"Total runtime: {results['total_runtime_seconds']:.2f} seconds\n\n")
         
         # Failure Discovery
@@ -577,7 +576,7 @@ def save_evaluation_results(results: Dict[str, Any], results_dir: str = "results
 def main():
     """Main entry point for evaluation."""
     results = run_evaluation(
-        n_scenarios=100,
+        n_scenarios=5,
         random_search_evals=20,
         hc_iterations=10,
         hc_neighbors_per_iter=10,

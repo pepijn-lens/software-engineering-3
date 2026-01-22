@@ -358,7 +358,7 @@ class HillClimbSearch:
                 # Reuse the same pool - workers already have policy loaded
                 # Use map_async with timeout to detect hung workers
                 # Timeout: 30 seconds per evaluation 
-                timeout_per_eval = 30
+                timeout_per_eval = 20
                 timeout = timeout_per_eval * neighbors_per_iter
                 async_result = pool.map_async(_evaluate_neighbor, eval_args)
                 try:
