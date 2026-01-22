@@ -3,9 +3,6 @@ import copy
 import os
 from typing import Tuple, Dict, Any
 
-# Disable video display - only save videos, don't show them
-os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')
-
 import gymnasium as gym
 import highway_env  # noqa: F401
 import numpy as np

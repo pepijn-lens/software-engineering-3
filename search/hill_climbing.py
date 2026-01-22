@@ -302,8 +302,8 @@ class HillClimbSearch:
         
         # If we found a crash immediately, record it
         if crashed:
-            print(f"💥 Collision found in initial configuration!")
-            record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
+            # print(f"💥 Collision found in initial configuration!")
+            # record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
             return {
                 "iteration": 0,
                 "initial_cfg": initial_cfg,
@@ -357,8 +357,8 @@ class HillClimbSearch:
                 hc_iter_start = time.time()
                 # Reuse the same pool - workers already have policy loaded
                 # Use map_async with timeout to detect hung workers
-                # Timeout: 120 seconds per evaluation (episodes are max 40 steps, so this is very generous)
-                timeout_per_eval = 120
+                # Timeout: 30 seconds per evaluation 
+                timeout_per_eval = 30
                 timeout = timeout_per_eval * neighbors_per_iter
                 async_result = pool.map_async(_evaluate_neighbor, eval_args)
                 try:
@@ -413,8 +413,8 @@ class HillClimbSearch:
                     
                     # If we found a crash, record it and return
                     if neighbor_obj["crash_count"] > 0:
-                        print(f"💥 Collision found at iteration {i}!")
-                        record_video_episode(self.env_id, neighbor_cfg, self.policy, self.defaults, neighbor_seed, out_dir="videos")
+                        # print(f"Collision found at iteration {i}!")
+                        # record_video_episode(self.env_id, neighbor_cfg, self.policy, self.defaults, neighbor_seed, out_dir="videos")
                         # Pool will be closed by finally block
                         return {
                             "iteration": i,
@@ -454,8 +454,8 @@ class HillClimbSearch:
             pool.close()
             pool.join()
         
-        # Record video of best configuration found
-        record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
+        # # Record video of best configuration found
+        # record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
         
         return {
             "iteration": iterations,

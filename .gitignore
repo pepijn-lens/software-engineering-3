@@ -11,4 +11,6 @@ __pycache__/
 *.pyzwz
 *.pyzwzw
 
+results*/
+
 videos/

@@ -26,12 +26,12 @@ def main():
     search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
 
     best_cfgs = []
-    n_scenarios = 50
+    n_scenarios = 10
 
     for i in range(n_scenarios):
         results = search.run_search(
             seed=i,  # Different seed for each scenario to get different initial configurations
-            iterations=15,
+            iterations=10,
             neighbors_per_iter=10,    # More neighbors with parallel = better exploration
             mutation_rate=0.3         # Mutation size: 0.3 = 30% of range (higher helps escape local minima)
         )

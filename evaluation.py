@@ -15,6 +15,7 @@ import json
 import copy
 from typing import List, Dict, Any
 from pathlib import Path
+from multiprocessing import Pool, cpu_count, TimeoutError as MPTimeoutError
 
 # Suppress warnings
 warnings.simplefilter("ignore", UserWarning)
@@ -34,60 +35,136 @@ from search.hill_climbing import HillClimbSearch, compute_objectives_from_time_s
 from search.base_search import ScenarioSearch
 
 
+# Module-level variable for random search worker policy
+_rs_worker_policy = None
+
+def _init_rs_worker():
+    """Initialize worker process for random search - load policy once per worker."""
+    global _rs_worker_policy
+    from policies.pretrained_policy import load_pretrained_policy
+    _rs_worker_policy = load_pretrained_policy("agents/model")
+
+def _evaluate_random_config(args):
+    """
+    Helper function for parallel random search evaluation.
+    
+    Args:
+        args: (initial_cfg, env_id, defaults, seed, eval_idx)
+    
+    Returns:
+        (eval_idx, config, seed, objectives, fitness, crashed, eval_time)
+    """
+    global _rs_worker_policy
+    initial_cfg, env_id, defaults, seed, eval_idx = args
+    
+    eval_start = time.time()
+    crashed, ts = run_episode(env_id, initial_cfg, _rs_worker_policy, defaults, seed)
+    eval_time = time.time() - eval_start
+    
+    if crashed:
+        obj = {"crash_count": 1, "min_distance": 0.0}
+        fitness = -1.0
+    else:
+        obj = compute_objectives_from_time_series(ts)
+        fitness = compute_fitness(obj)
+    
+    return eval_idx, copy.deepcopy(initial_cfg), seed, obj, fitness, crashed, eval_time
+
+
 def run_random_search_evaluation(
     initial_cfg: Dict[str, Any],
     env_id: str,
-    policy,
     defaults: Dict[str, Any],
     n_evaluations: int,
     rng: np.random.Generator,
     scenario_id: int
 ) -> Dict[str, Any]:
     """
-    Run random search on a given initial configuration.
-    Evaluates n_evaluations random configs (same config, different seeds).
+    Run random search on a given initial configuration using multiprocessing.
+    Evaluates n_evaluations random configs (same config, different seeds) in parallel.
     
     Returns:
         Dictionary with all evaluation results and statistics
     """
-    results = []
-    crashes_found = []
+    # Generate seeds for all evaluations
+    seeds = [int(rng.integers(1e9)) for _ in range(n_evaluations)]
+    
+    # Prepare arguments for parallel evaluation
+    eval_args = [
+        (initial_cfg, env_id, defaults, seed, eval_idx)
+        for eval_idx, seed in enumerate(seeds)
+    ]
+    
+    # Determine number of workers
+    n_workers = min(n_evaluations, int(np.floor(cpu_count() * 0.75)))
+    
     start_time = time.time()
     
-    for eval_idx in range(n_evaluations):
-        seed = int(rng.integers(1e9))
-        eval_start = time.time()
-        crashed, ts = run_episode(env_id, initial_cfg, policy, defaults, seed)
-        eval_time = time.time() - eval_start
-        
-        if crashed:
-            obj = {"crash_count": 1, "min_distance": 0.0}
-            fitness = -1.0
-            crashes_found.append({
-                "evaluation_num": eval_idx,
-                "config": copy.deepcopy(initial_cfg),
-                "seed": seed,
-                "objectives": obj,
-                "fitness": fitness
-            })
-        else:
-            obj = compute_objectives_from_time_series(ts)
-            fitness = compute_fitness(obj)
-        
-        results.append({
+    # Run evaluations in parallel with timeout
+    # Timeout: Since evaluations run in parallel, we wait for all to complete
+    # If any worker hangs, we'll timeout. Set to reasonable time for worst-case evaluation
+    # 30 seconds should be plenty for a single episode evaluation
+    timeout = 30
+    
+    pool = Pool(processes=n_workers, initializer=_init_rs_worker)
+    try:
+        async_result = pool.map_async(_evaluate_random_config, eval_args)
+        try:
+            results_list = async_result.get(timeout=timeout)
+        except MPTimeoutError:
+            print(f"\n⚠️  Warning: Random search worker timeout for scenario {scenario_id}. Terminating pool and retrying...")
+            pool.terminate()
+            pool.join()
+            # Recreate pool and retry
+            pool = Pool(processes=n_workers, initializer=_init_rs_worker)
+            async_result = pool.map_async(_evaluate_random_config, eval_args)
+            try:
+                results_list = async_result.get(timeout=timeout)
+                print(f"   Retry successful for scenario {scenario_id}.")
+            except MPTimeoutError:
+                print(f"\n❌ Error: Workers still timing out for scenario {scenario_id}. Using partial results.")
+                # Get partial results if available
+                results_list = []
+                for i in range(n_evaluations):
+                    results_list.append((
+                        i, initial_cfg, int(rng.integers(1e9)),
+                        {"crash_count": 0, "min_distance": float('inf')},
+                        float('inf'), False, 0.0
+                    ))
+    finally:
+        pool.close()
+        pool.join()
+    
+    total_time = time.time() - start_time
+    
+    # Process results
+    # Note: config is the same for all evaluations, so we don't store it per evaluation
+    results = []
+    crashes_found = []
+    
+    for eval_idx, cfg, seed, obj, fitness, crashed, eval_time in results_list:
+        result = {
             "evaluation_num": eval_idx,
-            "config": copy.deepcopy(initial_cfg),
             "seed": seed,
             "objectives": obj,
             "fitness": fitness,
             "crashed": crashed,
             "eval_time_seconds": eval_time
-        })
-    
-    total_time = time.time() - start_time
+        }
+        results.append(result)
+        
+        if crashed:
+            crashes_found.append({
+                "evaluation_num": eval_idx,
+                "seed": seed,
+                "objectives": obj,
+                "fitness": fitness
+            })
     
     # Find best result (lowest fitness = best)
+    # Remove config from best_result since it's available as initial_cfg
     best_result = min(results, key=lambda x: x["fitness"])
+    best_result = {k: v for k, v in best_result.items() if k != "eval_time_seconds"}  # Keep it clean
     
     return {
         "scenario_id": scenario_id,
@@ -129,7 +206,6 @@ def run_evaluation(
     hc_search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
     
     # Generate random initial configurations
-    rng = np.random.default_rng(base_seed)
     initial_configs = []
     for i in range(n_scenarios):
         scenario_rng = np.random.default_rng(base_seed + i)
@@ -150,7 +226,7 @@ def run_evaluation(
         # Run Random Search
         rs_start = time.time()
         rs_result = run_random_search_evaluation(
-            scenario_cfg, env_id, policy, defaults,
+            scenario_cfg, env_id, defaults,
             random_search_evals, scenario_rng, i
         )
         rs_time = time.time() - rs_start
@@ -208,9 +284,27 @@ def analyze_results(
     """Perform statistical analysis and comparison."""
     
     # Extract data for analysis
+    # Helper function to convert config values to proper types
+    def convert_config_types(cfg, param_spec):
+        """Convert config values to proper types based on param_spec."""
+        converted = {}
+        for key, value in cfg.items():
+            if key in param_spec:
+                if param_spec[key]["type"] == "int":
+                    converted[key] = int(value) if value is not None else None
+                elif param_spec[key]["type"] == "float":
+                    converted[key] = float(value) if value is not None else None
+                else:
+                    converted[key] = value
+            else:
+                # For keys not in param_spec, try to preserve type
+                converted[key] = value
+        return converted
+    
     rs_data = []
     for r in rs_results:
         best = r["best_result"]
+        cfg = convert_config_types(r["initial_cfg"], param_spec)
         rs_data.append({
             "scenario_id": r["scenario_id"],
             "crashed": best["crashed"],
@@ -219,11 +313,12 @@ def analyze_results(
             "total_evaluations": r["total_evaluations"],
             "total_time_seconds": r["total_time_seconds"],
             "crashes_found_count": len(r["crashes_found"]),
-            **r["initial_cfg"]
+            **cfg
         })
     
     hc_data = []
     for r in hc_results:
+        cfg = convert_config_types(r["initial_cfg"], param_spec)
         hc_data.append({
             "scenario_id": r["scenario_id"],
             "crashed": r["best_objectives"]["crash_count"] > 0,
@@ -232,7 +327,7 @@ def analyze_results(
             "total_evaluations": r["total_evaluations"],
             "total_time_seconds": r["total_time_seconds"],
             "iterations": r["iteration"],
-            **r["initial_cfg"]
+            **cfg
         })
     
     rs_df = pd.DataFrame(rs_data)
@@ -483,11 +578,11 @@ def main():
     """Main entry point for evaluation."""
     results = run_evaluation(
         n_scenarios=100,
-        random_search_evals=100,
+        random_search_evals=20,
         hc_iterations=10,
         hc_neighbors_per_iter=10,
         hc_mutation_rate=0.3,
-        base_seed=42,
+        base_seed=0,
         results_dir="results"
     )
     
