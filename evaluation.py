@@ -573,20 +573,4 @@ def save_evaluation_results(results: Dict[str, Any], results_dir: str = "results
         f.write("\n" + "="*80 + "\n")
 
 
-def main():
-    """Main entry point for evaluation."""
-    results = run_evaluation(
-        n_scenarios=5,
-        random_search_evals=20,
-        hc_iterations=10,
-        hc_neighbors_per_iter=10,
-        hc_mutation_rate=0.3,
-        base_seed=0,
-        results_dir="results"
-    )
-    
-    return results
 
-
-if __name__ == "__main__":
-    main()

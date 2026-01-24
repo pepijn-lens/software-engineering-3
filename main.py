@@ -15,33 +15,41 @@ from policies.pretrained_policy import load_pretrained_policy
 from envs.highway_env_utils import make_env
 from search.random_search import RandomSearch
 from search.hill_climbing import HillClimbSearch
+from evaluation import run_evaluation
 
 def main():
-    env_id = "highway-fast-v0"
-    policy = load_pretrained_policy("agents/model")
-    env, defaults = make_env(env_id)
+    results = run_evaluation(
+        n_scenarios=5,
+        random_search_evals=20,
+        hc_iterations=10,
+        hc_neighbors_per_iter=10,
+        hc_mutation_rate=0.3,
+        base_seed=0,
+        results_dir="results"
+    )
 
-    # Initialize search
+
+    # # Initialize search
+    # # search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
     # search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
-    search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
 
-    best_cfgs = []
-    n_scenarios = 10
+    # best_cfgs = []
+    # n_scenarios = 10
 
-    for i in range(n_scenarios):
-        results = search.run_search(
-            seed=i,  # Different seed for each scenario to get different initial configurations
-            iterations=10,
-            neighbors_per_iter=10,    # More neighbors with parallel = better exploration
-            mutation_rate=0.3         # Mutation size: 0.3 = 30% of range (higher helps escape local minima)
-        )
-        best_cfgs.append(results['best_cfg'])
+    # for i in range(n_scenarios):
+    #     results = search.run_search(
+    #         seed=i,  # Different seed for each scenario to get different initial configurations
+    #         iterations=10,
+    #         neighbors_per_iter=10,    # More neighbors with parallel = better exploration
+    #         mutation_rate=0.3         # Mutation size: 0.3 = 30% of range (higher helps escape local minima)
+    #     )
+    #     best_cfgs.append(results['best_cfg'])
     
-    results_df = pd.DataFrame(best_cfgs)
-    print("\n" + "="*60)
-    print("SUMMARY STATISTICS")
-    print("="*60)
-    print(results_df.describe())
+    # results_df = pd.DataFrame(best_cfgs)
+    # print("\n" + "="*60)
+    # print("SUMMARY STATISTICS")
+    # print("="*60)
+    # print(results_df.describe())
     
 
     # print("\n" + "="*60)
