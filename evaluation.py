@@ -2,9 +2,10 @@
 Evaluation and Comparison Script for Hill Climbing vs Random Search
 
 This script:
-1. Generates N random scenario configurations
-2. Runs Random Search on each scenario (100 evaluations per scenario)
-3. Runs Hill Climbing on the same scenarios (10 iterations × 10 neighbors = 100 evaluations)
+1. Generates N random scenario configurations (one per scenario as HC starting point)
+2. For each scenario: runs Hill Climbing first (from that config)
+3. Then runs Random Search with the same number of evaluations as HC used;
+   each RS evaluation is a new random config (one episode each)
 4. Compares results and saves analysis to files
 """
 
@@ -72,27 +73,41 @@ def _evaluate_random_config(args):
 
 
 def run_random_search_evaluation(
-    initial_cfg: Dict[str, Any],
     env_id: str,
     defaults: Dict[str, Any],
     n_evaluations: int,
     rng: np.random.Generator,
-    scenario_id: int
+    scenario_id: int,
+    search_obj: Any,
 ) -> Dict[str, Any]:
     """
-    Run random search on a given initial configuration using multiprocessing.
-    Evaluates n_evaluations random configs (same config, different seeds) in parallel.
+    Run random search: evaluate n_evaluations different random configs (one episode each).
+    Each evaluation is a new random scenario config, aligned with HC's evaluation budget.
     
     Returns:
         Dictionary with all evaluation results and statistics
     """
-    # Generate seeds for all evaluations
+    if n_evaluations <= 0:
+        dummy_cfg = ScenarioSearch.sample_random_config(search_obj, rng)
+        return {
+            "scenario_id": scenario_id,
+            "initial_cfg": dummy_cfg,
+            "best_cfg": dummy_cfg,
+            "all_evaluations": [],
+            "crashes_found": [],
+            "best_result": {"evaluation_num": 0, "seed": 0, "objectives": {"crash_count": 0, "min_distance": float("inf")}, "fitness": float("inf"), "crashed": False},
+            "total_evaluations": 0,
+            "total_time_seconds": 0.0,
+            "avg_time_per_eval_seconds": 0.0
+        }
+    # Sample n_evaluations different random configs (same as HC evaluation count)
+    configs = [ScenarioSearch.sample_random_config(search_obj, rng) for _ in range(n_evaluations)]
     seeds = [int(rng.integers(1e9)) for _ in range(n_evaluations)]
     
-    # Prepare arguments for parallel evaluation
+    # Prepare arguments for parallel evaluation (each eval = one config, one seed)
     eval_args = [
-        (initial_cfg, env_id, defaults, seed, eval_idx)
-        for eval_idx, seed in enumerate(seeds)
+        (configs[i], env_id, defaults, seeds[i], i)
+        for i in range(n_evaluations)
     ]
     
     # Determine number of workers
@@ -100,11 +115,8 @@ def run_random_search_evaluation(
     
     start_time = time.time()
     
-    # Run evaluations in parallel with timeout
-    # Timeout: Since evaluations run in parallel, we wait for all to complete
-    # If any worker hangs, we'll timeout. Set to reasonable time for worst-case evaluation
-    # 30 seconds should be plenty for a single episode evaluation
-    timeout = n_workers + 10
+    # Run evaluations in parallel with timeout (allow ~2s per eval in worst case)
+    timeout = max(120, n_evaluations * 2)
     
     pool = Pool(processes=n_workers, initializer=_init_rs_worker)
     try:
@@ -123,22 +135,20 @@ def run_random_search_evaluation(
                 print(f"   Retry successful for scenario {scenario_id}.")
             except MPTimeoutError:
                 print(f"\n❌ Error: Workers still timing out for scenario {scenario_id}. Using partial results.")
-                # Get partial results if available
-                results_list = []
-                for i in range(n_evaluations):
-                    results_list.append((
-                        i, initial_cfg, int(rng.integers(1e9)),
-                        {"crash_count": 0, "min_distance": float('inf')},
-                        float('inf'), False, 0.0
-                    ))
+                # Fallback: no results
+                results_list = [
+                    (i, configs[i], int(rng.integers(1e9)),
+                     {"crash_count": 0, "min_distance": float('inf')},
+                     float('inf'), False, 0.0)
+                    for i in range(n_evaluations)
+                ]
     finally:
         pool.close()
         pool.join()
     
     total_time = time.time() - start_time
     
-    # Process results
-    # Note: config is the same for all evaluations, so we don't store it per evaluation
+    # Process results (each evaluation had its own config)
     results = []
     crashes_found = []
     
@@ -158,17 +168,20 @@ def run_random_search_evaluation(
                 "evaluation_num": eval_idx,
                 "seed": seed,
                 "objectives": obj,
-                "fitness": fitness
+                "fitness": fitness,
+                "config": copy.deepcopy(cfg)
             })
     
-    # Find best result (lowest fitness = best)
-    # Remove config from best_result since it's available as initial_cfg
-    best_result = min(results, key=lambda x: x["fitness"])
-    best_result = {k: v for k, v in best_result.items() if k != "eval_time_seconds"}  # Keep it clean
+    # Best result and the config that achieved it
+    best_result_entry = min(results, key=lambda x: x["fitness"])
+    best_result = {k: v for k, v in best_result_entry.items() if k != "eval_time_seconds"}
+    best_cfg = next(cfg for eval_idx, cfg, *_ in results_list if eval_idx == best_result_entry["evaluation_num"])
+    first_cfg = configs[0]
     
     return {
         "scenario_id": scenario_id,
-        "initial_cfg": initial_cfg,
+        "initial_cfg": first_cfg,
+        "best_cfg": best_cfg,
         "all_evaluations": results,
         "crashes_found": crashes_found,
         "best_result": best_result,
@@ -189,10 +202,12 @@ def run_evaluation(
 ) -> Dict[str, Any]:
     """
     Run evaluation comparing Random Search vs Hill Climbing on the same scenarios.
+    For each scenario: run HC first, then run RS with the same number of evaluations
+    as HC used. Each RS evaluation is a new random config (one episode each).
     
     Args:
         n_scenarios: Number of random scenarios to generate and test
-        random_search_evals: Number of evaluations per scenario for random search
+        random_search_evals: Unused (kept for backward compatibility). RS evals = HC total_evaluations per scenario.
         hc_iterations: Number of hill climbing iterations per scenario
         hc_neighbors_per_iter: Number of neighbors per hill climbing iteration
         hc_mutation_rate: Mutation rate for hill climbing
@@ -218,26 +233,12 @@ def run_evaluation(
     
     total_start_time = time.time()
     
-    # Run evaluations
+    # Run evaluations: for each scenario, HC first then RS with the same number of evaluations
     for i in tqdm(range(n_scenarios), desc="Evaluating scenarios"):
         scenario_cfg = initial_configs[i]
         scenario_rng = np.random.default_rng(base_seed + i)
         
-        # Run Random Search
-        rs_start = time.time()
-        rs_result = run_random_search_evaluation(
-            scenario_cfg, env_id, defaults,
-            random_search_evals, scenario_rng, i
-        )
-        rs_time = time.time() - rs_start
-        rs_result["total_time_seconds"] = rs_time
-        random_search_results.append(rs_result)
-        # Save video for first Random Search crash in this scenario (if any)
-        if rs_result["crashes_found"]:
-            crash0 = rs_result["crashes_found"][0]
-            record_video_episode(env_id, scenario_cfg, policy, defaults, crash0["seed"], out_dir="videos/random_search")
-        
-        # Run Hill Climbing (starting from the same initial config)
+        # Run Hill Climbing first (from initial config)
         hc_start = time.time()
         hc_result = hc_search.run_search(
             seed=base_seed + i,
@@ -251,6 +252,20 @@ def run_evaluation(
         hc_result["initial_cfg"] = scenario_cfg
         hc_result["total_time_seconds"] = hc_time
         hill_climbing_results.append(hc_result)
+        
+        # Run Random Search with same evaluation count as HC (each RS eval = one new random config)
+        n_rs_evals = hc_result["total_evaluations"]
+        rs_start = time.time()
+        rs_result = run_random_search_evaluation(
+            env_id, defaults, n_rs_evals, scenario_rng, i, hc_search
+        )
+        rs_time = time.time() - rs_start
+        rs_result["total_time_seconds"] = rs_time
+        random_search_results.append(rs_result)
+        # Save video for first Random Search crash in this scenario (if any)
+        if rs_result["crashes_found"]:
+            crash0 = rs_result["crashes_found"][0]
+            record_video_episode(env_id, crash0["config"], policy, defaults, crash0["seed"], out_dir="videos/random_search")
     
     total_time = time.time() - total_start_time
     
@@ -261,12 +276,11 @@ def run_evaluation(
     evaluation_results = {
         "parameters": {
             "n_scenarios": n_scenarios,
-            "random_search_evals": random_search_evals,
             "hc_iterations": hc_iterations,
             "hc_neighbors_per_iter": hc_neighbors_per_iter,
             "hc_mutation_rate": hc_mutation_rate,
             "base_seed": base_seed,
-            "total_evaluations_per_method": random_search_evals
+            "note": "RS evaluations per scenario = HC total_evaluations for that scenario (same budget)"
         },
         "random_search_results": random_search_results,
         "hill_climbing_results": hill_climbing_results,
@@ -308,7 +322,7 @@ def analyze_results(
     rs_data = []
     for r in rs_results:
         best = r["best_result"]
-        cfg = convert_config_types(r["initial_cfg"], param_spec)
+        cfg = convert_config_types(r["best_cfg"], param_spec)
         rs_data.append({
             "scenario_id": r["scenario_id"],
             "crashed": best["crashed"],
@@ -343,9 +357,9 @@ def analyze_results(
     rs_crash_rate = rs_crashes / len(rs_df)
     hc_crash_rate = hc_crashes / len(hc_df)
     
-    # Distinct crashes: for RS the failing scenario is initial_cfg; for HC it is best_cfg
+    # Distinct crashes: for both, use the config that actually crashed (best_cfg)
     rs_crash_configs = set(
-        tuple(sorted(r["initial_cfg"].items()))
+        tuple(sorted(r["best_cfg"].items()))
         for r in rs_results if r["best_result"]["crashed"]
     )
     hc_crash_configs = set(
@@ -377,8 +391,10 @@ def analyze_results(
     # 2. Efficiency Analysis
     rs_avg_time = rs_df["total_time_seconds"].mean()
     hc_avg_time = hc_df["total_time_seconds"].mean()
-    rs_avg_time_per_eval = rs_avg_time / rs_df["total_evaluations"].iloc[0]
-    hc_avg_time_per_eval = hc_avg_time / hc_df["total_evaluations"].mean()
+    rs_total_evals = rs_df["total_evaluations"].sum()
+    hc_total_evals = hc_df["total_evaluations"].sum()
+    rs_avg_time_per_eval = rs_df["total_time_seconds"].sum() / rs_total_evals if rs_total_evals else 0
+    hc_avg_time_per_eval = hc_df["total_time_seconds"].sum() / hc_total_evals if hc_total_evals else 0
     
     # 3. Scenario Characteristics (for crashes)
     rs_crash_scenarios = [r for r in rs_results if r["best_result"]["crashed"]]
@@ -416,12 +432,12 @@ def analyze_results(
             "random_search": {
                 "avg_time_per_scenario_seconds": float(rs_avg_time),
                 "avg_time_per_evaluation_seconds": float(rs_avg_time_per_eval),
-                "total_evaluations": int(rs_df["total_evaluations"].sum())
+                "total_evaluations": int(rs_total_evals)
             },
             "hill_climbing": {
                 "avg_time_per_scenario_seconds": float(hc_avg_time),
                 "avg_time_per_evaluation_seconds": float(hc_avg_time_per_eval),
-                "total_evaluations": int(hc_df["total_evaluations"].sum())
+                "total_evaluations": int(hc_total_evals)
             }
         },
         "scenario_characteristics": {
@@ -506,7 +522,7 @@ def save_evaluation_results(results: Dict[str, Any], results_dir: str = "results
         f.write("-" * 80 + "\n")
         params = results["parameters"]
         f.write(f"Number of scenarios: {params['n_scenarios']}\n")
-        f.write(f"Random Search evaluations per scenario: {params['random_search_evals']}\n")
+        f.write(f"Random Search evaluations per scenario: same as HC for that scenario (matched budget)\n")
         f.write(f"Hill Climbing iterations: {params['hc_iterations']}\n")
         f.write(f"Hill Climbing neighbors per iteration: {params['hc_neighbors_per_iter']}\n")
         f.write(f"Total runtime: {results['total_runtime_seconds']:.2f} seconds\n\n")

@@ -16,7 +16,7 @@ python main.py
 
 This runs the experiment reported in the assignment: Hill Climbing vs Random Search on 100 scenarios.
 
-**Parameters** (in `main.py`): `n_scenarios=100`, `random_search_evals=20`, `hc_iterations=10`, `hc_neighbors_per_iter=10`, `hc_mutation_rate=0.3`, `base_seed=0`.
+**Parameters** (in `main.py`): `n_scenarios=100`, `hc_iterations=10`, `hc_neighbors_per_iter=10`, `hc_mutation_rate=0.3`, `base_seed=0`. Random Search gets the same number of evaluations as Hill Climbing per scenario (each RS eval = one new random config).
 
 ## Outputs
 

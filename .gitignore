@@ -12,5 +12,3 @@ __pycache__/
 *.pyzwzw
 
 results/*.json
-
-videos/

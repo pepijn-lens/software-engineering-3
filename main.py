@@ -13,10 +13,9 @@ from evaluation import run_evaluation
 def main():
     results = run_evaluation(
         n_scenarios=100,
-        random_search_evals=20,
         hc_iterations=10,
         hc_neighbors_per_iter=10,
-        hc_mutation_rate=0.3,
+        hc_mutation_rate=0.1,
         base_seed=0,
         results_dir="results"
     )

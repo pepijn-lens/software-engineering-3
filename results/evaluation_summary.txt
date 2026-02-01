@@ -5,55 +5,55 @@ EVALUATION SUMMARY: Hill Climbing vs Random Search
 PARAMETERS
 --------------------------------------------------------------------------------
 Number of scenarios: 100
-Random Search evaluations per scenario: 20
+Random Search evaluations per scenario: same as HC for that scenario (matched budget)
 Hill Climbing iterations: 10
 Hill Climbing neighbors per iteration: 10
-Total runtime: 4769.36 seconds
+Total runtime: 5484.44 seconds
 
 1. FAILURE DISCOVERY
 --------------------------------------------------------------------------------
 Random Search:
-  - Crashes found: 38 / 100
-  - Crash rate: 38.00%
-  - Distinct crashes: 38
-  - First crash at evaluation: 6
-  - Avg min distance (non-crashes): 4.3579m
-  - Min distance range: [3.9839, 8.4172]m
+  - Crashes found: 65 / 100
+  - Crash rate: 65.00%
+  - Distinct crashes: 65
+  - First crash at evaluation: 0
+  - Avg min distance (non-crashes): 4.3485m
+  - Min distance range: [3.9899, 11.9241]m
 
 Hill Climbing:
   - Crashes found: 80 / 100
   - Crash rate: 80.00%
   - Distinct crashes: 80
   - First crash at evaluation: 14
-  - Avg min distance (non-crashes): 3.9980m
-  - Min distance range: [3.9856, 4.0007]m
+  - Avg min distance (non-crashes): 3.9911m
+  - Min distance range: [3.8798, 4.0002]m
 
 2. EFFICIENCY
 --------------------------------------------------------------------------------
-Total runtime: 4769.36 seconds
+Total runtime: 5484.44 seconds
 
 Random Search:
-  - Avg time per scenario: 11.20 seconds
-  - Avg time per evaluation: 0.5601 seconds
-  - Total evaluations: 2000
+  - Avg time per scenario: 21.50 seconds
+  - Avg time per evaluation: 0.5060 seconds
+  - Total evaluations: 4250
 
 Hill Climbing:
-  - Avg time per scenario: 35.05 seconds
-  - Avg time per evaluation: 0.8845 seconds
-  - Total evaluations: 3963
+  - Avg time per scenario: 30.70 seconds
+  - Avg time per evaluation: 0.7224 seconds
+  - Total evaluations: 4250
 
 3. SCENARIO CHARACTERISTICS
 --------------------------------------------------------------------------------
 Random Search Crash Scenarios:
-  - Vehicles count: 33.84 ± 14.58
-  - Lanes count: 8.53 ± 1.77
-  - Initial spacing: 2.99 ± 1.27
-  - Initial lane ID: 4.21 ± 2.66
+  - Vehicles count: 35.09 ± 16.58
+  - Lanes count: 8.34 ± 1.82
+  - Initial spacing: 2.92 ± 1.27
+  - Initial lane ID: 3.88 ± 2.61
 
 Hill Climbing Crash Scenarios:
-  - Vehicles count: 35.76 ± 15.14
-  - Lanes count: 7.66 ± 2.05
-  - Initial spacing: 2.85 ± 1.35
-  - Initial lane ID: 3.33 ± 2.59
+  - Vehicles count: 34.94 ± 14.76
+  - Lanes count: 7.67 ± 2.07
+  - Initial spacing: 2.88 ± 1.31
+  - Initial lane ID: 3.41 ± 2.53
 
 ================================================================================
