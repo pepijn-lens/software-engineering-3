@@ -8,18 +8,11 @@ warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 os.environ['PYTHONWARNINGS'] = "ignore::UserWarning"
 
-import pandas as pd
-
-from config.search_space import param_spec, base_cfg
-from policies.pretrained_policy import load_pretrained_policy
-from envs.highway_env_utils import make_env
-from search.random_search import RandomSearch
-from search.hill_climbing import HillClimbSearch
 from evaluation import run_evaluation
 
 def main():
     results = run_evaluation(
-        n_scenarios=5,
+        n_scenarios=100,
         random_search_evals=20,
         hc_iterations=10,
         hc_neighbors_per_iter=10,
@@ -29,38 +22,6 @@ def main():
     )
 
 
-    # # Initialize search
-    # # search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
-    # search = HillClimbSearch(env_id, base_cfg, param_spec, policy, defaults)
-
-    # best_cfgs = []
-    # n_scenarios = 10
-
-    # for i in range(n_scenarios):
-    #     results = search.run_search(
-    #         seed=i,  # Different seed for each scenario to get different initial configurations
-    #         iterations=10,
-    #         neighbors_per_iter=10,    # More neighbors with parallel = better exploration
-    #         mutation_rate=0.3         # Mutation size: 0.3 = 30% of range (higher helps escape local minima)
-    #     )
-    #     best_cfgs.append(results['best_cfg'])
-    
-    # results_df = pd.DataFrame(best_cfgs)
-    # print("\n" + "="*60)
-    # print("SUMMARY STATISTICS")
-    # print("="*60)
-    # print(results_df.describe())
-    
-
-    # print("\n" + "="*60)
-    # print("RESULTS")
-    # print("="*60)
-    # print(f"Best fitness: {results['best_fitness']:.4f}")
-    # print(f"Crash found: {results['best_objectives']['crash_count'] > 0}")
-    # print(f"Min distance: {results['best_objectives']['min_distance']:.4f}m")
-    # print(f"Config: {results['best_cfg']}")
-    # print(f"Seed: {results['best_seed_base']}")
-    # print(f"Video saved to: {results['video_folder']}")
 
 if __name__ == "__main__":
     main()

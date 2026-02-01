@@ -8,8 +8,7 @@ Number of scenarios: 100
 Random Search evaluations per scenario: 20
 Hill Climbing iterations: 10
 Hill Climbing neighbors per iteration: 10
-Total evaluations per method: 20
-Total runtime: 4340.52 seconds
+Total runtime: 4769.36 seconds
 
 1. FAILURE DISCOVERY
 --------------------------------------------------------------------------------
@@ -31,16 +30,16 @@ Hill Climbing:
 
 2. EFFICIENCY
 --------------------------------------------------------------------------------
-Total runtime: 4340.52 seconds
+Total runtime: 4769.36 seconds
 
 Random Search:
-  - Avg time per scenario: 15.94 seconds
-  - Avg time per evaluation: 0.7972 seconds
+  - Avg time per scenario: 11.20 seconds
+  - Avg time per evaluation: 0.5601 seconds
   - Total evaluations: 2000
 
 Hill Climbing:
-  - Avg time per scenario: 27.46 seconds
-  - Avg time per evaluation: 0.6929 seconds
+  - Avg time per scenario: 35.05 seconds
+  - Avg time per evaluation: 0.8845 seconds
   - Total evaluations: 3963
 
 3. SCENARIO CHARACTERISTICS

@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 from config.search_space import param_spec, base_cfg
 from policies.pretrained_policy import load_pretrained_policy
-from envs.highway_env_utils import make_env, run_episode
+from envs.highway_env_utils import make_env, run_episode, record_video_episode
 from search.hill_climbing import HillClimbSearch, compute_objectives_from_time_series, compute_fitness
 from search.base_search import ScenarioSearch
 
@@ -232,6 +232,10 @@ def run_evaluation(
         rs_time = time.time() - rs_start
         rs_result["total_time_seconds"] = rs_time
         random_search_results.append(rs_result)
+        # Save video for first Random Search crash in this scenario (if any)
+        if rs_result["crashes_found"]:
+            crash0 = rs_result["crashes_found"][0]
+            record_video_episode(env_id, scenario_cfg, policy, defaults, crash0["seed"], out_dir="videos/random_search")
         
         # Run Hill Climbing (starting from the same initial config)
         hc_start = time.time()
@@ -339,13 +343,13 @@ def analyze_results(
     rs_crash_rate = rs_crashes / len(rs_df)
     hc_crash_rate = hc_crashes / len(hc_df)
     
-    # Distinct crashes
+    # Distinct crashes: for RS the failing scenario is initial_cfg; for HC it is best_cfg
     rs_crash_configs = set(
         tuple(sorted(r["initial_cfg"].items()))
         for r in rs_results if r["best_result"]["crashed"]
     )
     hc_crash_configs = set(
-        tuple(sorted(r["initial_cfg"].items()))
+        tuple(sorted(r["best_cfg"].items()))
         for r in hc_results if r["best_objectives"]["crash_count"] > 0
     )
     

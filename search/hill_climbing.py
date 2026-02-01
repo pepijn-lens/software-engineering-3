@@ -302,8 +302,7 @@ class HillClimbSearch:
         
         # If we found a crash immediately, record it
         if crashed:
-            # print(f"💥 Collision found in initial configuration!")
-            # record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
+            record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos/hill_climbing")
             return {
                 "iteration": 0,
                 "initial_cfg": initial_cfg,
@@ -413,9 +412,7 @@ class HillClimbSearch:
                     
                     # If we found a crash, record it and return
                     if neighbor_obj["crash_count"] > 0:
-                        # print(f"Collision found at iteration {i}!")
-                        # record_video_episode(self.env_id, neighbor_cfg, self.policy, self.defaults, neighbor_seed, out_dir="videos")
-                        # Pool will be closed by finally block
+                        record_video_episode(self.env_id, neighbor_cfg, self.policy, self.defaults, neighbor_seed, out_dir="videos/hill_climbing")
                         return {
                             "iteration": i,
                             "initial_cfg": initial_cfg,
@@ -454,9 +451,9 @@ class HillClimbSearch:
             pool.close()
             pool.join()
         
-        # # Record video of best configuration found
-        # record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos")
-        
+        # Optionally record video of best (non-crash) scenario for analysis; assignment asks for "videos of failures" so we only record on crash above
+        # record_video_episode(self.env_id, best_cfg, self.policy, self.defaults, best_seed_base, out_dir="videos/hill_climbing")
+
         return {
             "iteration": iterations,
             "initial_cfg": initial_cfg,
