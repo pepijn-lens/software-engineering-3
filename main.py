@@ -12,11 +12,11 @@ from evaluation import run_evaluation
 
 def main():
     results = run_evaluation(
-        n_scenarios=100,
+        n_scenarios=50,
         hc_iterations=10,
         hc_neighbors_per_iter=10,
         hc_mutation_rate=0.1,
-        base_seed=0,
+        base_seed=1,
         results_dir="results"
     )
 

@@ -159,7 +159,8 @@ def run_random_search_evaluation(
             "objectives": obj,
             "fitness": fitness,
             "crashed": crashed,
-            "eval_time_seconds": eval_time
+            "eval_time_seconds": eval_time,
+            "config": copy.deepcopy(cfg),
         }
         results.append(result)
         

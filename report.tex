@@ -1,0 +1,249 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{float}
+
+\geometry{margin=2.5cm}
+
+% Code listing style
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red},
+    commentstyle=\color{green!60!black},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    showstringspaces=false,
+    tabsize=2
+}
+
+\title{Assignment 3: Scenario-Based Testing of RL Agents\\
+\large Hill Climbing vs Random Search for Autonomous Driving Agent Testing}
+\author{Martin Jansen \\ Emma Michielsen \\ Lizelot Mebius \\ Pepijn Lens}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Hill-Climbing Design and Rationale}
+
+\subsection{Fitness Function}
+
+The fitness function is designed to minimize a scalar value that represents how close a scenario is to failure. The design follows a two-tier approach implemented through two functions: \texttt{compute\_objectives\_from\_time\_series} and \texttt{compute\_fitness}.
+
+The objective extraction function computes two key metrics from the time-series data. First, a binary crash count indicator (0 or 1) that signals whether any collision occurred during the episode. Second, the minimum Euclidean distance between the ego vehicle and any other vehicle across all time steps. The minimum distance is computed by iterating through all frames in the time-series, extracting ego and other vehicle positions, and calculating the Euclidean distance between their center positions. The minimum value across all frames and all other vehicles is recorded.
+
+The fitness computation function then converts these objectives into a single scalar value to minimize:
+
+\begin{lstlisting}
+if objectives["crash_count"] > 0:
+    return -1.0  # Best possible fitness
+else:
+    return objectives["min_distance"]  # Smaller is better
+\end{lstlisting}
+
+This design ensures three critical properties. First, any crashing scenario is strictly better than any non-crashing scenario, with crashes receiving fitness = -1.0 while non-crashes receive positive distance values. Second, among non-crashing scenarios, smaller minimum distances indicate higher risk and are preferred. Third, the fitness landscape is clear: crashes form a distinct, optimal region, while non-crashes form a continuous space where lower values are better.
+
+The rationale for this simple but effective design is that it allows the hill climber to clearly distinguish between successful failure discovery (crashes) and near-misses (small distances). The binary crash indicator ensures that crashes are always prioritized, while the minimum distance provides a gradient for optimization when crashes are not found.
+
+\subsection{Mutation Operators}
+
+The mutation operator (\texttt{mutate\_config}) implements a single-parameter mutation strategy with adaptive step sizes. The mutation strategy randomly selects one parameter from the search space (vehicles\_count, lanes\_count, initial\_spacing, ego\_spacing, or initial\_lane\_id), applies a mutation step proportional to the parameter's valid range, and uses a configurable \texttt{mutation\_rate} (default 0.2 in the code, 0.1 in our experiments) that determines the maximum step size as a fraction of the parameter range.
+
+For integer parameters, the step size is calculated as $\max(1, \lfloor \text{range} \times \text{mutation\_rate} \rfloor)$, ensuring at least 1 unit change. For float parameters, the step size is $\text{range} \times \text{mutation\_rate}$, allowing continuous adjustments. All values are clamped to valid bounds defined in \texttt{param\_spec}, with special handling for \texttt{initial\_lane\_id} to ensure it remains valid when \texttt{lanes\_count} changes.
+
+\subsection{Search Strategy}
+
+The hill climbing algorithm implements a best-improvement strategy with parallel neighbor evaluation. The algorithm starts from a random configuration sampled uniformly from the search space and evaluates it to establish a baseline.
+
+Each iteration follows a structured process. First, neighbor generation creates \texttt{neighbors\_per\_iter} (default 10) neighbors by applying mutations to the current configuration. Second, parallel evaluation assesses all neighbors simultaneously using multiprocessing, significantly reducing wall-clock time. Third, selection identifies the neighbor with the best (lowest) fitness value. Fourth, acceptance moves to the best neighbor if it improves upon the current fitness, following a strict improvement policy. Fifth, early termination stops immediately if any neighbor results in a crash.
+
+Key design choices include parallel evaluation using multiprocessing, reducing overhead and enabling efficient parallel execution. The algorithm uses strict improvement acceptance, only moving to neighbors that improve fitness and preventing degradation. Best-neighbor selection evaluates multiple neighbors per iteration and selects the best, increasing the chance of finding improvements. Early stopping terminates immediately upon crash discovery, as the primary goal is achieved.
+
+The rationale for these choices is that parallel evaluation addresses the computational bottleneck of episode simulation, making the search practical for large-scale evaluation. The first-improvement strategy with multiple neighbors per iteration balances exploration (multiple candidates) and exploitation (selecting the best). Early stopping optimizes for the primary objective (finding crashes) rather than continuing to optimize distance when a crash is already found.
+
+
+\section{Experimental Evaluation and Comparison}
+
+\subsection{Experimental Setup}
+
+The evaluation compared Hill Climbing (HC) against Random Search (RS) on 50 independent test scenarios. For each scenario, both methods were given equal evaluation budgets:
+\begin{itemize}
+\item Hill Climbing starts from a random configuration and performs up to 10 iterations with 10 neighbors per iteration, plus 1 initial evaluation, stopping early if a crash is found.
+\item Random Search evaluates the same number of random configurations as Hill Climbing used for that scenario.
+\item Total across all 50 scenarios: 2385 evaluations for each method (averaging $\sim$48 evaluations per scenario).
+\end{itemize}
+The mutation rate was set to 0.1. This fair comparison ensures both methods have the same computational budget. The key metric is: \textbf{in how many of the 50 scenarios did each method successfully find at least one crash?}
+
+\subsection{Failure Discovery}
+
+Hill Climbing demonstrated a 1.15$\times$ higher success rate at finding crashes. Out of the 50 independent test scenarios:
+\begin{itemize}
+\item Random Search found at least one crash in 34 scenarios (68.00\% success rate)
+\item Hill Climbing found at least one crash in 39 scenarios (78.00\% success rate)
+\end{itemize}
+
+This means that for each scenario, both methods performed multiple evaluations (2385 total evaluations each across all 50 scenarios), and we measure success as finding at least one crash among those evaluations for that scenario.
+
+Regarding first crash discovery across all evaluations, Random Search found its first crash at evaluation 3, while Hill Climbing found its first crash at evaluation 14. While Random Search found its first crash earlier (likely due to random chance), Hill Climbing's systematic approach led to discovering crashes in more scenarios overall (78\% vs 68\%).
+
+For scenarios where crashes were not found, the minimum distance statistics reveal important differences. Random Search achieved an average min distance of 4.50m with range [3.99, 11.92]m, while Hill Climbing achieved an average min distance of 4.00m with range [3.997, 4.000]m. Hill Climbing consistently found scenarios with smaller minimum distances (closer to failure), indicating more effective exploration of the failure boundary. Both methods found distinct crash configurations (34 for RS, 39 for HC), indicating diverse failure modes were discovered.
+
+\subsection{Scenario Characteristics}
+
+Table~\ref{tab:crash_params} shows the parameter statistics for crash scenarios discovered by both methods.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Random Search} & \textbf{Hill Climbing} \\
+\midrule
+Vehicles count & $32.06 \pm 16.54$ & $34.82 \pm 15.84$ \\
+Lanes count & $8.68 \pm 1.61$ & $7.74 \pm 2.04$ \\
+Initial spacing & $3.04 \pm 1.10$ & $2.75 \pm 1.28$ \\
+Initial lane ID & $4.00 \pm 2.93$ & $3.13 \pm 2.49$ \\
+\bottomrule
+\end{tabular}
+\caption{Parameter statistics for crash scenarios}
+\label{tab:crash_params}
+\end{table}
+
+Both methods found crashes across a wide range of parameter values. Hill Climbing found crashes with slightly higher vehicle counts on average (34.82 vs 32.06), suggesting it explores denser traffic scenarios more effectively. Both methods found crashes with relatively high lane counts (7--8 lanes), indicating multi-lane scenarios are more challenging for the agent. Hill Climbing found crashes with tighter initial spacing (2.75 vs 3.04), suggesting it more effectively identifies configurations where vehicles start closer together. The parameter distributions are similar, suggesting both methods converge toward similar failure-inducing configurations, but HC finds them more reliably.
+
+\subsection{Non-Crash Scenario Characteristics}
+
+An analysis of all non-crash evaluations (not just the best per scenario) reveals how each method explores the search space. Table~\ref{tab:noncrash_params} shows the parameter statistics for all non-crash evaluations.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Random Search} & \textbf{Hill Climbing} \\
+\midrule
+Vehicles count & $32.82 \pm 16.20$ & $34.51 \pm 15.04$ \\
+Lanes count & $6.40 \pm 2.27$ & $5.24 \pm 2.21$ \\
+Initial spacing & $2.77 \pm 1.28$ & $2.85 \pm 1.04$ \\
+Initial lane ID & $2.72 \pm 2.25$ & $1.51 \pm 1.67$ \\
+Ego spacing & $2.48 \pm 0.86$ & $2.36 \pm 0.88$ \\
+\bottomrule
+\end{tabular}
+\caption{Parameter statistics for all non-crash evaluations (Random Search: n=2298, Hill Climbing: n=2346)}
+\label{tab:noncrash_params}
+\end{table}
+
+Random Search explored 2298 non-crash evaluations while Hill Climbing explored 2346, reflecting similar evaluation budgets. Hill Climbing's non-crash evaluations show slightly higher vehicle counts (34.51 vs 32.82) but fewer lanes on average (5.24 vs 6.40), suggesting it systematically explores denser, simpler lane configurations. Hill Climbing's lower initial lane ID variance (1.51 $\pm$ 1.67 vs 2.72 $\pm$ 2.25) and tighter ego spacing (2.36 vs 2.48) indicate more focused exploration around promising regions. The similar initial spacing values suggest both methods identify this parameter's importance for failure scenarios.
+
+Comparing crash scenarios to non-crash evaluations reveals critical differences in failure-inducing conditions. The most striking difference is lane count: crash scenarios consistently feature 7--8 lanes (7.74--8.68 across both methods) compared to 5--6 lanes (5.24--6.40) in non-crash evaluations. This 2--3 lane difference suggests that complex multi-lane environments with more lane-changing opportunities significantly increase crash risk. Additionally, crash scenarios tend to have higher initial lane IDs (3.13--4.00) compared to non-crash evaluations (1.51--2.72), indicating that starting in middle or outer lanes is more dangerous than inner lanes. Vehicle counts remain similar between crash and non-crash scenarios (32--35 vehicles), suggesting that density alone is not the primary failure factor---rather, it's the combination of high vehicle density with complex multi-lane configurations. Initial spacing shows modest differences, with crash scenarios having slightly tighter or similar spacing (2.75--3.04m) compared to non-crash (2.77--2.85m). These findings suggest the agent struggles most with complex lane-changing decisions in high-lane-count scenarios when starting from middle or outer lane positions, rather than simply failing due to high traffic density.
+
+\subsection{Efficiency}
+
+The total runtime was 3388.04 seconds ($\approx$56 minutes) for 50 test scenarios. Random Search required an average of 30.86 seconds per scenario, with 0.647 seconds per evaluation, totaling 2385 configuration evaluations across all 50 scenarios. Hill Climbing required an average of 34.80 seconds per scenario, with 0.730 seconds per evaluation, totaling 2385 configuration evaluations across all 50 scenarios (matching Random Search exactly, as designed).
+
+Hill Climbing requires slightly more time per scenario (1.13$\times$) despite using the same number of evaluations. This is due to sequential iterations---each iteration must complete before the next begins. However, Hill Climbing achieves a comparable time per evaluation (0.730s vs 0.647s), with the small difference likely due to overhead from iteration management and result processing between iterations.
+
+Both methods scale linearly with the number of scenarios. Hill Climbing's parallel neighbor evaluation within each iteration makes it efficient at evaluating multiple neighbors simultaneously. The matched evaluation budgets (2385 each) ensure a fair comparison where Hill Climbing's higher crash discovery rate (78\% vs 68\%) reflects algorithmic superiority rather than simply using more resources.
+
+\subsection{Qualitative Observations}
+
+Several failure patterns emerged from the analysis. Both methods found crashes more frequently in scenarios with higher vehicle counts (around 32--35 vehicles), indicating that traffic density is a key factor in failure. Crashes occurred more often with 7--8 lanes, suggesting that complex lane-changing scenarios are challenging for the agent. Initial spacing around 2.75--3.04 appears to be a ``sweet spot'' for crashes---too sparse and vehicles don't interact, too dense and the agent may be more cautious or the environment may prevent collisions. Initial lane ID varies widely, suggesting crashes occur across different starting positions.
+
+Hill Climbing consistently converged toward scenarios with smaller minimum distances when crashes were not found. The algorithm showed clear improvement trajectories, with fitness decreasing over iterations. The mutation strategy (rate=0.1) allowed the algorithm to explore different parameter combinations systematically while maintaining focus on promising regions.
+
+Random Search occasionally found crashes very early (evaluation 3 across all experiments), but succeeded in finding crashes in only 68\% of the 50 test scenarios. Hill Climbing's systematic approach led to more consistent crash discovery, succeeding in 78\% of test scenarios. Hill Climbing's ability to refine scenarios (reducing min distance to nearly the theoretical minimum of 4.0m when crashes weren't found) suggests it effectively explores the failure boundary.
+
+\subsection{Pros and Cons}
+
+Hill Climbing's primary strengths include higher effectiveness with finding crashes in 78\% of test scenarios vs 68\% for Random Search (10 percentage point improvement), systematic exploration through guided search toward failure-inducing scenarios rather than random sampling, consistent convergence finding scenarios closer to failure when crashes aren't found (avg 4.00m vs 4.50m), and reproducibility through deterministic search paths given a seed.
+
+However, Hill Climbing has several weaknesses. Iterations depend on previous results, limiting parallelization across iterations (though neighbors within iterations are parallelized). It may get stuck in local minima, though multiple neighbors per iteration and the low mutation rate (0.1) help mitigate this. Performance depends on mutation rate and neighbors\_per\_iter settings, requiring parameter tuning. The sequential nature of iterations adds slight overhead (1.13$\times$ time per scenario vs Random Search).
+
+Random Search's strengths include simplicity in implementation and understanding, no hyperparameters requiring tuning, full parallelization with independent evaluations allowing maximum parallelization, diverse exploration through uniform sampling ensuring broad coverage of the search space, and occasionally finding crashes very early (evaluation 3).
+
+Random Search's weaknesses include lower effectiveness (finding crashes in only 68\% of test scenarios vs 78\% for Hill Climbing), no learning from previous evaluations, inefficiency by potentially wasting evaluations on low-risk scenarios, no convergence or systematic improvement toward failure, and less effective refinement (avg min distance 4.50m vs 4.00m for HC).
+
+The trade-offs are clear: Hill Climbing achieves higher success at finding crashes (10 percentage points higher) with the same evaluation budget, making it preferable when finding failures is critical. Random Search is simpler and requires no tuning, making it a good baseline but less effective for systematic testing. For safety-critical applications, Hill Climbing's superior crash discovery (finding failures in 78\% vs 68\% of scenarios) and refinement capabilities justify the minimal additional computational overhead (13\% more time per scenario).
+
+\section{Reflection and Insights}
+
+\subsection{Strengths of Search-Based Testing for RL Agents}
+
+Search-based testing (SBT) provides a structured approach to finding failures in RL agents. Unlike random testing, SBT uses feedback from evaluations to guide exploration toward failure-inducing scenarios. Our results demonstrate that Hill Climbing successfully found crashes in 10 percentage points more test scenarios than Random Search (78\% vs 68\%) with the same evaluation budget (2385 evaluations each), validating the effectiveness of guided search.
+
+The approach works entirely with observable behavior (time-series data, crash flags), making it applicable to any RL agent without requiring access to internal policy details. This is crucial for testing third-party or proprietary agents where source code is unavailable. Parallel evaluation makes SBT practical for large-scale testing. Our implementation used multiprocessing to evaluate multiple neighbors simultaneously, reducing wall-clock time significantly while maintaining search effectiveness. Given a seed, the search produces deterministic results, enabling reproducible failure scenarios for debugging and agent improvement.
+
+\subsection{Limitations and Challenges}
+
+The fitness function is a critical design choice that significantly impacts search effectiveness. Our simple design (crash indicator + minimum distance) worked well, but more sophisticated objectives (e.g., time-to-collision, lane-specific risks, velocity considerations) might improve results further. However, complex objectives may also introduce noise or local optima.
+
+Hill Climbing can get stuck in local optima, especially in complex search spaces. While multiple neighbors per iteration and the mutation rate help, our experiments with mutation\_rate=0.1 appeared conservative, potentially limiting exploration. More sophisticated strategies (e.g., simulated annealing, restarts, or adaptive mutation rates) could improve exploration. Each evaluation requires running a full episode simulation, which is computationally expensive. While parallelization helps, the sequential nature of hill climbing iterations limits overall speedup. For very large search spaces, more efficient search strategies or surrogate models might be needed.
+
+Hill Climbing performance depends on hyperparameters (mutation rate, neighbors per iteration). Finding optimal settings requires experimentation. Our choice of mutation\_rate=0.1 and neighbors\_per\_iter=10 performed well, but other values might yield better results. Hill Climbing focuses on promising regions, potentially missing failures in distant areas of the search space. Random Search provides better coverage but lower effectiveness. Hybrid approaches (e.g., periodic random restarts) could combine both benefits.
+
+\subsection{Lessons Learned}
+
+A simple, clear fitness function (crash indicator + minimum distance) proved effective. More complex objectives might not necessarily improve results and can introduce complexity. The key is ensuring crashes are always prioritized over near-misses. Without parallel evaluation, Hill Climbing would be impractical for large-scale testing. Multiprocessing with pre-loaded policies significantly reduced overhead and made the approach feasible.
+
+Single-parameter mutation with adaptive step sizes worked well, providing focused exploration while allowing escape from local optima. The mutation rate (0.1 in our experiments) appeared conservative but still effective, balancing exploitation of promising regions with some exploration. Terminating immediately upon crash discovery optimizes for the primary objective. Continuing to optimize distance when a crash is already found would waste evaluations.
+
+Comparing against Random Search with matched evaluation budgets provided valuable context. While both methods used 2385 total evaluations across 50 scenarios, Hill Climbing successfully found crashes in 10 percentage points more scenarios (78\% vs 68\%), demonstrating clear value. The comparison also revealed that both methods find similar failure patterns (high vehicle counts, 7--8 lanes, moderate spacing), validating the approach. The non-crash evaluation analysis showed Hill Climbing's systematic exploration strategy, with more focused parameter distributions indicating guided search.
+
+\subsection{Future Directions}
+
+Future work could explore more sophisticated objectives, such as time-to-collision metrics, lane-specific risk measures, velocity and acceleration considerations, and multi-objective optimization (Pareto fronts). Advanced search strategies could include simulated annealing for better escape from local optima, genetic algorithms for population-based exploration, Bayesian optimization for efficient search in high-dimensional spaces, and adaptive mutation rates based on search progress (e.g., higher rates when stuck, lower rates when making progress).
+
+Training lightweight surrogate models to predict crash likelihood could reduce evaluation costs, allowing more extensive search. Hybrid approaches combining Random Search (broad exploration) with Hill Climbing (focused exploitation) could improve both coverage and effectiveness. For example, periodic random restarts from diverse starting points could help Hill Climbing escape local optima while maintaining systematic refinement.
+
+Investigating different mutation rates would be valuable. Our experiments used 0.1, but higher rates (e.g., 0.2--0.3) might improve exploration at the cost of exploitation. Adaptive schemes that adjust the mutation rate based on recent progress could provide the best of both worlds. Finally, analyzing the search trajectories and understanding why certain parameter combinations lead to crashes could provide insights for improving both the search algorithm and the RL agent itself.
+
+\subsection{Conclusion}
+
+Search-based testing using Hill Climbing proved effective for discovering failures in RL agents, successfully finding crashes in 78\% of test scenarios compared to 68\% for Random Search, despite using the same evaluation budget (2385 evaluations each across 50 scenarios). The approach's strengths---systematic exploration, black-box applicability, fair efficiency, and reproducibility---make it valuable for safety-critical RL applications. While limitations exist (local optima, sequential iterations, parameter sensitivity), the results demonstrate clear value over random testing.
+
+The key insights are that simple fitness functions can be effective when properly designed, parallel evaluation is essential for practical application, guided search significantly outperforms random exploration for failure discovery, and matched evaluation budgets provide a fair comparison framework. Hill Climbing's ability to consistently refine scenarios toward the failure boundary (achieving avg min distance of 4.00m vs 4.50m for Random Search) demonstrates its systematic approach to exploring risky configurations.
+
+For practitioners, Hill Climbing with conservative mutation rates (0.1--0.2), moderate neighbor counts (10), and parallel evaluation provides a practical and effective approach to scenario-based testing of RL agents. The minimal overhead compared to Random Search (13\% more time per scenario) is worthwhile for a 10 percentage point increase in success rate (finding crashes in 78\% vs 68\% of test scenarios).
+
+\section*{Appendix: Implementation Details}
+
+\subsection*{Key Implementation Features}
+
+The implementation includes parallel evaluation using multiprocessing with worker processes that pre-load the policy, timeout handling for graceful management of hung workers with retry mechanisms, complete evaluation history tracking for analysis, early stopping with immediate termination upon crash discovery, and adaptive mutation with step sizes proportional to parameter ranges.
+
+\subsection*{Code Structure}
+
+The codebase consists of \texttt{search/hill\_climbing.py} for the core Hill Climbing implementation, \texttt{evaluation.py} for the comprehensive evaluation and comparison framework, and \texttt{main.py} as the entry point for running evaluations.
+
+\subsection*{Reproducibility}
+
+All experiments use fixed seeds for reproducibility. Results can be reproduced by running:
+
+\begin{lstlisting}
+run_evaluation(
+    n_scenarios=50,
+    hc_iterations=10,
+    hc_neighbors_per_iter=10,
+    hc_mutation_rate=0.1,
+    base_seed=1,
+    results_dir="results"
+)
+\end{lstlisting}
+
+Note: The evaluation framework automatically matches Random Search's evaluation budget to Hill Climbing's total evaluations per scenario, ensuring a fair comparison.
+
+\end{document}
